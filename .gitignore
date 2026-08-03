@@ -1,0 +1,38 @@
+# Công cụ và IDE
+.claude
+.vscode
+.cusor
+.idea
+
+# Bí mật — không bao giờ commit (NFR-SEC-02)
+.env
+.env.prod
+.env.test
+.env.local
+*.env.local
+
+# Node
+node_modules/
+.next/
+out/
+npm-debug.log*
+*.tsbuildinfo
+next-env.d.ts
+
+# .NET
+bin/
+obj/
+*.user
+TestResults/
+infra/backups/
+coverage/
+
+upload/
+private/
+zdraft/
+
+# Tệp nháp mở bằng trình duyệt, không thuộc mã nguồn.
+/temp.html
+
+# Bản lùi do infra/scripts/env-switch.sh sinh ra mỗi lần đổi môi trường.
+.env.bak
