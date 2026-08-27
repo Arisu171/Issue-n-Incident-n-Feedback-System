@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Git Issues">
+  <title>Git Issues</title>
+  <!--
+    Cây nhánh của git: một nhánh chính chạy dọc, một nhánh rẽ ra rồi nhập lại.
+    Vẽ bằng nét chứ không tô đặc để hình còn rõ ở 16px trên thanh tab.
+    Màu cố định (không dùng currentColor): favicon nằm ngoài phạm vi CSS của trang,
+    currentColor ở đây sẽ rơi về màu đen mặc định và biến mất trên tab nền tối.
+  -->
+  <g fill="none" stroke="#f05133" stroke-width="3" stroke-linecap="round">
+    <path d="M10 9.5V22.5" />
+    <path d="M22 11.5V14a4 4 0 0 1-4 4h-4a4 4 0 0 0-4 4" />
+  </g>
+  <g fill="#f05133">
+    <circle cx="10" cy="6" r="3.5" />
+    <circle cx="10" cy="26" r="3.5" />
+    <circle cx="22" cy="8" r="3.5" />
+  </g>
+</svg>
