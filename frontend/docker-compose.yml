@@ -1,0 +1,5 @@
+# Không có compose riêng cho frontend: web cần API và database mới chạy được đầy đủ.
+#
+#   - Toàn bộ hệ thống : docker compose up --build          (ở thư mục gốc)
+#   - Chỉ database     : docker compose -f backend/docker-compose.yml up -d
+#   - Web ở chế độ dev : npm run dev

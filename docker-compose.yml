@@ -1,0 +1,168 @@
+# NFR-PORT-01 — một lệnh `docker compose up --build` phải đưa cả ba service web/api/db
+# về trạng thái healthy trên một máy mới. Cấu hình lấy từ .env (sinh từ .env.example).
+
+name: gitissues
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: it-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gitissues}
+      POSTGRES_USER: ${POSTGRES_USER:-gitissue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD chưa được đặt trong .env}
+      # Cần cho pg_isready khi container chưa có biến mặc định.
+      PGUSER: ${POSTGRES_USER:-gitissue}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: it-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      # Mặc định Warning: in mọi câu SQL ra log container là hàng chục nghìn dòng ngay lần khởi
+      # động đầu (dữ liệu demo đẩy hàng trăm event qua outbox), đủ để chôn vùi mọi cảnh báo thật
+      # và làm người xem tưởng hệ thống đang chạy vòng lặp. Đặt SQL_LOG_LEVEL=Information khi
+      # thật sự cần soi câu truy vấn.
+      LOGGING__LOGLEVEL__MICROSOFT.ENTITYFRAMEWORKCORE.DATABASE.COMMAND: ${SQL_LOG_LEVEL:-Warning}
+      # Mặc định trỏ vào service `db` kèm theo. Đặt DB_CONNECTION_STRING trong .env để trỏ
+      # sang một PostgreSQL bên ngoài (Supabase, Neon, RDS…) — khi đó POSTGRES_* bên trên chỉ
+      # còn tác dụng với container `db`, thứ bạn có thể bỏ chạy bằng `--scale db=0`.
+      CONNECTIONSTRINGS__DEFAULT: >-
+        ${DB_CONNECTION_STRING:-Host=db;Port=5432;Database=${POSTGRES_DB:-gitissues};Username=${POSTGRES_USER:-gitissue};Password=${POSTGRES_PASSWORD};Maximum Pool Size=${DB_MAX_POOL_SIZE:-40}}
+      JWT__SIGNINGKEY: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY chưa được đặt trong .env}
+      JWT__ISSUER: ${JWT_ISSUER:-gitissues-api}
+      JWT__AUDIENCE: ${JWT_AUDIENCE:-gitissues-web}
+      JWT__EXPIRYMINUTES: ${JWT_EXPIRY_MINUTES:-60}
+      JWT__SESSIONMAXHOURS: ${JWT_SESSION_MAX_HOURS:-12}
+      SEED__APPLYMIGRATIONS: "true"
+      SEED__ADMINEMAIL: ${SEED_ADMIN_EMAIL:-admin@gitissues.local}
+      SEED__ADMINPASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD chưa được đặt trong .env}
+      # Tài khoản `system` — danh tính chỉ nằm ở đây, không có mặc định trong mã nguồn.
+      # Thiếu một trong hai thì admin giữ tạm vai trò `system` (xem SeedOptions.SystemEmail).
+      SEED__SYSTEMEMAIL: ${SEED_SYSTEM_EMAIL:-}
+      SEED__SYSTEMPASSWORD: ${SEED_SYSTEM_PASSWORD:-}
+      # Dữ liệu trình diễn: chỉ bật ở môi trường demo/dev.
+      SEED__DEMODATA: ${SEED_DEMO_DATA:-false}
+      # Rỗng = theo môi trường (bật ở Development, tắt ở nơi khác).
+      SWAGGER__ENABLED: ${SWAGGER_ENABLED:-}
+      AUTH__PERMISSIONCACHESECONDS: ${AUTH_PERMISSION_CACHE_SECONDS:-0}
+      RATELIMIT__LOGINPERMINUTE: ${RATE_LIMIT_LOGIN_PER_MINUTE:-10}
+      RATELIMIT__REGISTERPERHOUR: ${RATE_LIMIT_REGISTER_PER_HOUR:-5}
+      REGISTRATION__ENABLED: ${REGISTRATION_ENABLED:-true}
+      REGISTRATION__ALLOWEDEMAILDOMAINS: ${REGISTRATION_ALLOWED_DOMAINS:-}
+      REGISTRATION__REQUIREAPPROVAL: ${REGISTRATION_REQUIRE_APPROVAL:-false}
+      REGISTRATION__DEFAULTROLES: ${REGISTRATION_DEFAULT_ROLES:-customer}
+      REGISTRATION__MINPASSWORDLENGTH: ${REGISTRATION_MIN_PASSWORD_LENGTH:-8}
+      FEEDBACK__AUTOACKENABLED: ${FEEDBACK_AUTO_ACK_ENABLED:-true}
+      FEEDBACK__AUTOACKMESSAGE: ${FEEDBACK_AUTO_ACK_MESSAGE:-Chúng tôi đã tiếp nhận phản hồi của bạn và sẽ phản hồi trong thời gian sớm nhất. Bạn có thể theo dõi trạng thái xử lý ngay tại trang này.}
+      CORS__ALLOWEDORIGINS__0: ${WEB_ORIGIN:-http://localhost:3000}
+      SLA__INVESTIGATINGHOURS: ${SLA_INVESTIGATING_HOURS:-24}
+      SLA__MITIGATINGHOURS: ${SLA_MITIGATING_HOURS:-48}
+      SLA__SCANINTERVALMINUTES: ${SLA_SCAN_INTERVAL_MINUTES:-15}
+      OBSERVABILITY__ENABLEPROMETHEUS: ${OBSERVABILITY_ENABLE_PROMETHEUS:-true}
+      OBSERVABILITY__TRACESAMPLERATIO: ${OBSERVABILITY_TRACE_SAMPLE_RATIO:-0.1}
+      SECURITY__REQUIREHTTPS: ${SECURITY_REQUIRE_HTTPS:-false}
+      # Địa chỉ nội bộ của service web để /api/health/system soi được cả ba service.
+      HEALTHCHECKS__WEBURL: http://web:3000/healthz
+      # --- Module Tickets (Architecture v3.1) ---
+      TICKETING__PUBLICBASEURL: ${WEB_ORIGIN:-http://localhost:3000}
+      TICKETING__PUBLICAPIBASEURL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+      TICKETING__READPERMINUTE: ${TICKETING_READ_PER_MINUTE:-300}
+      TICKETING__WRITEPERMINUTE: ${TICKETING_WRITE_PER_MINUTE:-100}
+      TICKETING__IDEMPOTENCYTTLHOURS: ${TICKETING_IDEMPOTENCY_TTL_HOURS:-24}
+      TICKETING__MAINTENANCEINTERVALMINUTES: ${TICKETING_MAINTENANCE_INTERVAL_MINUTES:-360}
+      # (số consumer × giá trị này) phải nhỏ hơn DB_MAX_POOL_SIZE, xem .env.example.
+      TICKETING__CONSUMERCONCURRENCY: ${TICKETING_CONSUMER_CONCURRENCY:-4}
+      # Rỗng = transport in-memory (đủ cho một instance). Đặt "rabbitmq" và chạy với --profile rabbitmq.
+      TICKETING__RABBITMQ__HOST: ${TICKETING_RABBITMQ_HOST:-}
+      TICKETING__RABBITMQ__USERNAME: ${TICKETING_RABBITMQ_USERNAME:-guest}
+      TICKETING__RABBITMQ__PASSWORD: ${TICKETING_RABBITMQ_PASSWORD:-guest}
+      TICKETING__WEBHOOKS__ALLOWPRIVATENETWORKS: ${TICKETING_WEBHOOKS_ALLOW_PRIVATE_NETWORKS:-false}
+      TICKETING__WEBHOOKS__RETRYSCANSECONDS: ${TICKETING_WEBHOOKS_RETRY_SCAN_SECONDS:-30}
+      TICKETING__SLA__SCANINTERVALMINUTES: ${TICKETING_SLA_SCAN_INTERVAL_MINUTES:-1}
+      TICKETING__STORAGE__LOCALPATH: /app/storage
+      TICKETING__STORAGE__MAXBYTES: ${TICKETING_STORAGE_MAX_BYTES:-26214400}
+      # S3 tuỳ chọn: có bucket thì presigned URL trỏ thẳng S3/MinIO thay vì API.
+      TICKETING__STORAGE__S3__BUCKET: ${TICKETING_S3_BUCKET:-}
+      TICKETING__STORAGE__S3__REGION: ${TICKETING_S3_REGION:-}
+      TICKETING__STORAGE__S3__SERVICEURL: ${TICKETING_S3_SERVICE_URL:-}
+      TICKETING__STORAGE__S3__ACCESSKEY: ${TICKETING_S3_ACCESS_KEY:-}
+      TICKETING__STORAGE__S3__SECRETKEY: ${TICKETING_S3_SECRET_KEY:-}
+      TICKETING__STORAGE__S3__PUBLICBASEURL: ${TICKETING_S3_PUBLIC_BASE_URL:-}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      # Tệp đính kèm khi dùng storage local (không cấu hình S3).
+      - api-storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Trình duyệt gọi API qua cổng đã publish của host, không qua tên service nội bộ.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    container_name: it-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # Tuỳ chọn (Architecture v3.1, mục 6.2): message broker bền cho nhiều instance API.
+  # Bật bằng: docker compose --profile rabbitmq up --build  và đặt TICKETING_RABBITMQ_HOST=rabbitmq trong .env
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: it-mq
+    profiles: ["rabbitmq"]
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${TICKETING_RABBITMQ_USERNAME:-guest}
+      RABBITMQ_DEFAULT_PASS: ${TICKETING_RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - mq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  db-data:
+  api-storage:
+  mq-data:

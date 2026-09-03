@@ -1,0 +1,116 @@
+# Render Blueprint — dịch vụ API.
+#
+# Dựng bằng: Render Dashboard → New → Blueprint → chọn repo này. Render đọc tệp này, tạo service,
+# rồi HỎI từng biến có `sync: false` — đó là những giá trị cố ý không nằm trong repo.
+#
+# Phạm vi: CHỈ API. Database là Supabase (ngoài Render), còn web deploy ở nơi khác vì Next.js của
+# dự án dùng route động theo dữ liệu người dùng, không export tĩnh được.
+#
+# Điều cần biết về gói free: service NGỦ sau 15 phút không có request, và request đánh thức đầu
+# tiên chờ khoảng một phút. Đĩa cũng là ephemeral — tệp đính kèm lưu local sẽ mất mỗi lần deploy,
+# muốn giữ thì cấu hình cụm TICKETING__STORAGE__S3__* ở cuối tệp.
+
+services:
+  - type: web
+    name: gitissues-api
+    runtime: docker
+    plan: free
+    # Supabase của dự án đặt ở ap-southeast-2 (Sydney); singapore là region Render gần nhất.
+    region: singapore
+    branch: main
+    autoDeploy: true
+
+    # Đường dẫn tính từ gốc repo. Context phải là `backend` vì Dockerfile copy theo đường tương
+    # đối bên trong thư mục đó (global.json, IncidentTracker.sln, src/…).
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+
+    # /api/health kiểm api + db. KHÔNG dùng /api/health/system: đường đó soi cả service web, mà
+    # web nằm ngoài Render — health check sẽ đỏ dù API hoàn toàn bình thường.
+    healthCheckPath: /api/health
+
+    envVars:
+      # --- Cách Render tìm thấy tiến trình -----------------------------------
+      # Dockerfile cố định ASPNETCORE_URLS=http://+:8080 và EXPOSE 8080.
+      - key: PORT
+        value: 8080
+
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+
+      # TLS đã kết thúc ở biên của Render, container chỉ nhận HTTP thuần. Mã KHÔNG gọi
+      # UseForwardedHeaders, nên bật cờ này lên là UseHttpsRedirection trả 307 cho mọi request,
+      # kể cả health check — service không bao giờ lên được.
+      - key: SECURITY__REQUIREHTTPS
+        value: false
+
+      # --- Database ----------------------------------------------------------
+      # Chuỗi Npgsql dạng khoá=giá trị (KHÔNG phải URI postgresql://…), cổng 5432 session mode
+      # vì migration lúc khởi động cần prepared statement. Kèm `Search Path=gitissues`.
+      - key: CONNECTIONSTRINGS__DEFAULT
+        sync: false
+
+      # --- JWT ---------------------------------------------------------------
+      # Render tự sinh giá trị ngẫu nhiên 256-bit dạng base64. Nếu vì lý do nào đó nó ngắn hơn
+      # 32 ký tự, app dừng ngay với thông điệp rõ ràng ("Jwt:SigningKey phải dài tối thiểu 32
+      # ký tự") — khi đó đổi sang `sync: false` và tự dán `openssl rand -base64 48`.
+      - key: JWT__SIGNINGKEY
+        generateValue: true
+      - key: JWT__ISSUER
+        value: gitissues-api
+      - key: JWT__AUDIENCE
+        value: gitissues-web
+
+      # --- Seed --------------------------------------------------------------
+      - key: SEED__APPLYMIGRATIONS
+        value: true
+      # Không cắm cứng ở đây. Bản triển khai này là trang trình diễn nên cần `true`, nhưng cùng
+      # blueprint có thể dùng cho một môi trường có dữ liệu thật — mà `value:` thì mỗi lần đồng
+      # bộ lại blueprint sẽ ghi đè giá trị đang đặt trên dashboard. Đặt ở dashboard, blueprint
+      # không đụng tới: sai lệch nếu có cũng chỉ là dữ liệu giả không được sinh, chứ không phải
+      # dữ liệu giả bị đổ vào một database thật.
+      - key: SEED__DEMODATA
+        sync: false
+      - key: SEED__ADMINEMAIL
+        sync: false
+      - key: SEED__ADMINPASSWORD
+        sync: false
+
+      # Tài khoản mang vai trò `system` (rank 120) — tách hẳn khỏi admin, và là tài khoản DUY
+      # NHẤT chạm được cấu hình nền cũng như tạo được admin mới. Danh tính của nó cố ý không
+      # xuất hiện trong repo, kể cả tệp này.
+      # Bỏ trống cả hai thì admin giữ tạm vai trò đó — dự phòng, không phải thiết kế.
+      - key: SEED__SYSTEMEMAIL
+        sync: false
+      - key: SEED__SYSTEMPASSWORD
+        sync: false
+
+      # --- Địa chỉ đối ngoại --------------------------------------------------
+      # Điền sau khi web đã có URL. CORS sai thì trình duyệt bị chặn dù API vẫn chạy.
+      - key: CORS__ALLOWEDORIGINS__0
+        sync: false
+      - key: TICKETING__PUBLICBASEURL
+        sync: false
+      - key: TICKETING__PUBLICAPIBASEURL
+        sync: false
+      # Địa chỉ /healthz của web, chỉ dùng cho /api/health/system. Sai thì riêng endpoint đó báo
+      # web unhealthy; /api/health — thứ Render dùng — không bị ảnh hưởng.
+      - key: HEALTHCHECKS__WEBURL
+        sync: false
+
+      # --- Tệp đính kèm (tuỳ chọn) -------------------------------------------
+      # Không đặt cụm này thì tệp lưu trong container và MẤT sau mỗi lần deploy. Supabase Storage
+      # tương thích S3; bucket phải để public vì với provider S3, đường tải có chữ ký ẩn danh
+      # (/api/storage/public/…) trả 404 — chỉ LocalStorageProvider dùng được đường đó.
+      - key: TICKETING__STORAGE__S3__BUCKET
+        sync: false
+      - key: TICKETING__STORAGE__S3__REGION
+        sync: false
+      - key: TICKETING__STORAGE__S3__SERVICEURL
+        sync: false
+      - key: TICKETING__STORAGE__S3__ACCESSKEY
+        sync: false
+      - key: TICKETING__STORAGE__S3__SECRETKEY
+        sync: false
+      - key: TICKETING__STORAGE__S3__PUBLICBASEURL
+        sync: false
