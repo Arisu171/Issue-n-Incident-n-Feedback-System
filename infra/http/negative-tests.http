@@ -1,0 +1,169 @@
+### Kiểm thử âm — bằng chứng bắt buộc cho phân quyền
+#
+# Kiểm thử dương chứng minh tính năng chạy. Chỉ kiểm thử âm chứng minh hệ thống biết TỪ CHỐI,
+# mà từ chối mới là toàn bộ giá trị của lớp phân quyền.
+#
+# Cách chạy: mở file này trong VS Code với extension REST Client, hoặc JetBrains HTTP Client.
+# Chạy tuần tự từ trên xuống — các request sau dùng token của request trước.
+#
+# Điều kiện: `docker compose up -d` đã chạy và `GET /api/health` trả 200.
+# Ba tài khoản dưới đây là tài khoản mẫu của môi trường lab; đổi cho khớp máy bạn.
+#
+# Bảng kết quả phải đạt:
+#   | # | Ca kiểm thử            | Kỳ vọng | Rủi ro nếu sai                        |
+#   | 1 | Thiếu token            | 401     | API mở hoàn toàn                      |
+#   | 2 | Token hỏng             | 401     | Chữ ký không được kiểm                |
+#   | 3 | Token hết hạn          | 401     | Phiên không bao giờ kết thúc          |
+#   | 4 | Sai vai trò            | 403     | Leo thang đặc quyền                   |
+#   | 5 | Sai chủ sở hữu — đọc   | 403     | BOLA, rò dữ liệu khách hàng khác      |
+#   | 6 | Sai chủ sở hữu — ghi   | 403     | BOLA, sửa dữ liệu của người khác      |
+#   | 7 | Vượt rate limit login  | 429     | Dò mật khẩu tự động không bị cản      |
+
+@host = http://localhost:8080
+
+@customerA = customer.a@lab.local
+@customerB = customer.b@lab.local
+@responder = responder@lab.local
+@password = Lab#2026_ChangeMe
+
+
+### ---------------------------------------------------------------------------
+### 0. Chuẩn bị — đăng nhập ba tài khoản
+### ---------------------------------------------------------------------------
+
+# @name loginCustomerA
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{customerA}}", "password": "{{password}}" }
+
+###
+
+# @name loginCustomerB
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{customerB}}", "password": "{{password}}" }
+
+###
+
+# @name loginResponder
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{responder}}", "password": "{{password}}" }
+
+###
+
+# Khách hàng A gửi một sự cố. Id của nó là mục tiêu cho ca 5 và ca 6.
+# @name incidentOfA
+POST {{host}}/api/incidents
+Content-Type: application/json
+Authorization: Bearer {{loginCustomerA.response.body.accessToken}}
+
+{ "title": "Khong dang nhap duoc vao ung dung", "severity": "High" }
+
+
+### ---------------------------------------------------------------------------
+### CA 1 — Thiếu token  →  kỳ vọng 401
+### Không có Authorization header. Nếu ra 200 nghĩa là API đang mở hoàn toàn.
+### ---------------------------------------------------------------------------
+GET {{host}}/api/incidents
+
+
+### ---------------------------------------------------------------------------
+### CA 2 — Token hỏng  →  kỳ vọng 401
+### Chữ ký sai. Nếu ra 200 nghĩa là server không kiểm chữ ký, ai cũng tự phát token được.
+### ---------------------------------------------------------------------------
+GET {{host}}/api/incidents
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJnaWEtbWFvIn0.chu-ky-sai
+
+
+### ---------------------------------------------------------------------------
+### CA 3 — Token hết hạn  →  kỳ vọng 401
+### Token dưới đây có exp nằm ở quá khứ. Nếu ra 200 nghĩa là phiên không bao giờ kết thúc,
+### và một token bị lộ sẽ dùng được vĩnh viễn.
+### ---------------------------------------------------------------------------
+GET {{host}}/api/incidents
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJleHAiOjE1MTYyMzkwMjJ9.het-han
+
+
+### ---------------------------------------------------------------------------
+### CA 4 — Sai vai trò  →  kỳ vọng 403
+### Khách hàng có token hợp lệ nhưng không có incident.delete.
+### Phân biệt với ca 1: đây là 403 (biết anh là ai, anh không được phép), không phải 401.
+### ---------------------------------------------------------------------------
+DELETE {{host}}/api/incidents/{{incidentOfA.response.body.id}}
+Authorization: Bearer {{loginCustomerA.response.body.accessToken}}
+
+
+### ---------------------------------------------------------------------------
+### CA 5 — Sai chủ sở hữu, chiều đọc  →  kỳ vọng 403
+### Khách hàng B có ĐÚNG permission incident.read, chỉ là sự cố này không phải của B.
+### Đây chính là ca mà kiểm tra theo vai trò một mình không bao giờ bắt được (BOLA).
+### ---------------------------------------------------------------------------
+GET {{host}}/api/incidents/{{incidentOfA.response.body.id}}
+Authorization: Bearer {{loginCustomerB.response.body.accessToken}}
+
+###
+# Cửa sau cùng loại: chặn được /{id} mà quên /history thì dữ liệu vẫn rò.
+GET {{host}}/api/incidents/{{incidentOfA.response.body.id}}/history
+Authorization: Bearer {{loginCustomerB.response.body.accessToken}}
+
+###
+# Và chặn được chiều đọc mà quên chiều ghi thì B vẫn móc được phản hồi vào sự cố của A.
+POST {{host}}/api/feedbacks
+Content-Type: application/json
+Authorization: Bearer {{loginCustomerB.response.body.accessToken}}
+
+{
+  "channel": "Web",
+  "content": "Co gan phan hoi vao su co cua nguoi khac.",
+  "incidentId": "{{incidentOfA.response.body.id}}"
+}
+
+
+### ---------------------------------------------------------------------------
+### CA 6 — Sai chủ sở hữu, chiều ghi  →  kỳ vọng 403
+### Responder nhận việc trước, rồi một người khác cũng có incident.update_status
+### cố chuyển trạng thái sự cố ấy.
+### ---------------------------------------------------------------------------
+
+# Bước 1: responder nhận việc — kỳ vọng 200, assignee trở thành responder.
+PATCH {{host}}/api/incidents/{{incidentOfA.response.body.id}}/status
+Content-Type: application/json
+Authorization: Bearer {{loginResponder.response.body.accessToken}}
+
+{ "targetStatus": "Mitigating", "note": "Dang trien khai ban va" }
+
+###
+# Bước 2: khách hàng A — người BÁO CÁO sự cố — vẫn không được tự chuyển trạng thái.
+# Sở hữu dữ liệu không đồng nghĩa với sở hữu quy trình xử lý.
+PATCH {{host}}/api/incidents/{{incidentOfA.response.body.id}}/status
+Content-Type: application/json
+Authorization: Bearer {{loginCustomerA.response.body.accessToken}}
+
+{ "targetStatus": "Resolved" }
+
+
+### ---------------------------------------------------------------------------
+### CA 7 — Vượt rate limit đăng nhập  →  kỳ vọng 429
+### Gửi liên tiếp quá RATE_LIMIT_LOGIN_PER_MINUTE lần trong một phút.
+### Mặc định là 10, nên chạy khối này 11 lần. Lần vượt ngưỡng phải trả 429.
+### ---------------------------------------------------------------------------
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{customerA}}", "password": "co-tinh-sai-de-do-mat-khau" }
+
+
+### ---------------------------------------------------------------------------
+### PHỤ — Security headers phải có trên MỌI response, kể cả response lỗi
+### Kiểm tra header trả về: X-Content-Type-Options: nosniff,
+### X-Frame-Options: DENY, Referrer-Policy: no-referrer.
+### ---------------------------------------------------------------------------
+GET {{host}}/api/health
+
+###
+# Kể cả trên 401 — đây là chỗ header hay bị mất nhất vì response bị dựng lại từ đầu.
+GET {{host}}/api/incidents
