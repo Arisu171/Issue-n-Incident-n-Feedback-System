@@ -1,0 +1,32 @@
+# Chỉ dựng PostgreSQL cho vòng lặp phát triển backend: `dotnet run` và `dotnet test`
+# chạy trên máy chủ, database chạy trong container.
+#
+# Toàn bộ hệ thống (web + api + db) dùng docker-compose.yml ở thư mục gốc.
+#
+#     docker compose -f backend/docker-compose.yml up -d
+#     export TEST_DB_CONNECTION="Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
+#     dotnet test
+
+name: incident-tracker-devdb
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: it-devdb
+    environment:
+      POSTGRES_DB: incident_tracker
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGUSER: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - devdb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  devdb-data:
