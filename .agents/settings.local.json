@@ -1,0 +1,75 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Bash(*)",
+      "PowerShell",
+      "PowerShell(*)",
+      "mcp__playwright",
+      "mcp__plugin_playwright_playwright",
+      "mcp__figma",
+      "mcp__next-devtools",
+      "mcp__gitnexus",
+      "mcp__antd-components",
+      "mcp__sequential-thinking",
+      "Read(//d/Edusoft/lms.edusoft.vn/**)",
+      "Glob(//d/Edusoft/lms.edusoft.vn/**)",
+      "Grep(//d/Edusoft/lms.edusoft.vn/**)",
+      "Write(//d/Edusoft/lms.edusoft.vn/**)",
+      "Edit(//d/Edusoft/lms.edusoft.vn/**)"
+    ],
+    "deny": [],
+    "defaultMode": "bypassPermissions",
+    "additionalDirectories": [
+      "../edusoft-lms-api",
+      "D:/Edusoft/lms.edusoft.vn/edusoft-lms-api",
+      "//d/Edusoft/lms.edusoft.vn/edusoft-lms-api",
+      "D:/Edusoft/lms.edusoft.vn/edusoft-lms"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": ["*"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Glob|Grep|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/auto-approve-edusoft-paths.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/auto-approve-mcp.mjs\""
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Read|Glob|Grep|Write|Edit|MultiEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/auto-approve-edusoft-paths.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/auto-approve-mcp.mjs\""
+          }
+        ]
+      }
+    ]
+  },
+  "skipDangerousModePermissionPrompt": true
+}
