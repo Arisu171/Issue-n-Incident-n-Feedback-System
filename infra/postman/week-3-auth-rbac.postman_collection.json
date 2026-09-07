@@ -1,0 +1,1286 @@
+{
+ "info": {
+  "name": "Tuần 3 — JWT, RBAC & Hardening",
+  "description": "Bộ kiểm thử cho buổi thực hành tuần 3 của Incident & Feedback Tracker.\n\nCÁCH DÙNG\n1. Đặt biến baseUrl, adminEmail, adminPassword cho khớp .env của bạn.\n2. Chạy lần lượt nhóm 0 để lấy token và tạo dữ liệu mẫu.\n3. Chạy các nhóm 1 đến 5 theo thứ tự.\n\nNhóm 1 đến 3 là kiểm thử âm — chúng chứng minh hệ thống biết TỪ CHỐI, và đó mới là toàn bộ giá trị của lớp phân quyền. Nhóm 5 là đối chứng, để phân biệt 'phân quyền đúng' với 'hỏng toàn bộ'.\n\nEmail khách hàng có hậu tố ngẫu nhiên sinh ở pre-request script, nên chạy lại nhiều lần không bị 409 trùng email. Lưu ý rate limit đăng ký mặc định 5 lần/giờ/IP.",
+  "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ },
+ "event": [
+  {
+   "listen": "prerequest",
+   "script": {
+    "type": "text/javascript",
+    "exec": [
+     "// Sinh email và username mới cho mỗi lần chạy để không đụng ràng buộc duy nhất.",
+     "if (!pm.collectionVariables.get(\"runId\")) {",
+     "  pm.collectionVariables.set(\"runId\", Date.now().toString(36));",
+     "}",
+     "const r = pm.collectionVariables.get(\"runId\");",
+     "pm.collectionVariables.set(\"customerAEmail\", `kh-a-${r}@lab.local`);",
+     "pm.collectionVariables.set(\"customerBEmail\", `kh-b-${r}@lab.local`);",
+     "pm.collectionVariables.set(\"customerALogin\", `kh-a-${r}`);",
+     "pm.collectionVariables.set(\"customerBLogin\", `kh-b-${r}`);"
+    ]
+   }
+  }
+ ],
+ "item": [
+  {
+   "name": "0. Chuẩn bị — chạy đúng thứ tự một lần",
+   "description": "Đăng nhập admin, tạo hai tài khoản khách hàng và một sự cố làm mục tiêu cho các ca kiểm thử âm. Chỉ cần chạy lại nhóm này khi token hết hạn (mặc định 15 phút).",
+   "item": [
+    {
+     "name": "0.1 Đăng nhập admin",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"identifier\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/auth/login",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "auth",
+        "login"
+       ]
+      },
+      "description": "Lấy token quản trị. Token lưu vào biến collection để các request sau dùng lại."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "const b = pm.response.json();",
+         "pm.collectionVariables.set(\"adminToken\", b.accessToken);",
+         "pm.test(\"Token có hạn dùng ngắn\", () => pm.expect(b.expiresInSeconds).to.be.below(3601));",
+         "pm.test(\"Trả về danh sách permission\", () => pm.expect(b.permissions).to.be.an(\"array\"));",
+         "console.log(\"Vai trò:\", b.roles.join(\", \"), \"| số permission:\", b.permissions.length);"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "0.2 Đăng ký khách hàng A",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"email\": \"{{customerAEmail}}\",\n  \"username\": \"{{customerALogin}}\",\n  \"displayName\": \"Khách hàng A\",\n  \"password\": \"{{customerPassword}}\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/auth/register",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "auth",
+        "register"
+       ]
+      },
+      "description": "Đường công khai. Body cố ý KHÔNG có trường roles — người đăng ký không tự chọn được vai trò."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+         "const b = pm.response.json();",
+         "pm.test(\"Chỉ nhận vai trò customer\", () => pm.expect(b.roles).to.eql([\"customer\"]));",
+         "pm.collectionVariables.set(\"customerAToken\", b.session.accessToken);",
+         "pm.collectionVariables.set(\"customerAId\", b.userId);"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "0.3 Đăng ký khách hàng B",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"email\": \"{{customerBEmail}}\",\n  \"username\": \"{{customerBLogin}}\",\n  \"displayName\": \"Khách hàng B\",\n  \"password\": \"{{customerPassword}}\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/auth/register",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "auth",
+        "register"
+       ]
+      },
+      "description": "Cần tài khoản thứ hai thì mới chứng minh được ranh giới dữ liệu giữa hai người dùng."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+         "pm.collectionVariables.set(\"customerBToken\", pm.response.json().session.accessToken);"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "0.4 Khách hàng A tham gia project",
+     "request": {
+      "method": "PUT",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/project-catalog/{{project}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "project-catalog",
+        "{{project}}"
+       ]
+      },
+      "description": "Vai trò customer được cấp quyền trên project, nhưng quyền chỉ có hiệu lực khi người dùng đã tự tham gia. Khách B cố ý KHÔNG tham gia — đó là biến độc lập của nhóm 3."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 204\", () => pm.response.to.have.status(204));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "0.5 Khách hàng A gửi sự cố",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"title\": \"Không đăng nhập được vào ứng dụng\",\n  \"description\": \"Bấm đăng nhập thì báo lỗi 500.\",\n  \"severity\": \"High\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents"
+       ]
+      },
+      "description": "Sự cố này là mục tiêu cho toàn bộ nhóm 3. Ghi nhận reporter từ token, không từ body."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 201\", () => pm.response.to.have.status(201));",
+         "const b = pm.response.json();",
+         "pm.collectionVariables.set(\"incidentAId\", b.id);",
+         "pm.test(\"Khởi tạo ở Investigating\", () => pm.expect(b.status).to.eql(\"Investigating\"));",
+         "pm.test(\"Reporter lấy từ token\", () => pm.expect(b.reporter.id).to.eql(pm.collectionVariables.get(\"customerAId\")));"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "1. Xác thực — ma trận 401",
+   "description": "Ba cách một request có thể thiếu danh tính hợp lệ. Cả ba phải cho 401, và thông điệp lỗi không được nói rõ hỏng ở đâu.",
+   "item": [
+    {
+     "name": "1.1 Thiếu token → 401",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents"
+       ]
+      },
+      "description": "Không có header Authorization. Nếu ra 200 thì API đang mở hoàn toàn."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+         "pm.test(\"Lỗi theo chuẩn ProblemDetails\", () => {",
+         "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+         "});",
+         "pm.test(\"Có correlationId để tra log\", () => {",
+         "  pm.expect(pm.response.json().correlationId).to.be.a(\"string\");",
+         "});",
+         "pm.test(\"Không lộ lý do cụ thể\", () => {",
+         "  const d = pm.response.json().detail.toLowerCase();",
+         "  pm.expect(d).to.not.include(\"signature\");",
+         "  pm.expect(d).to.not.include(\"expired\");",
+         "});"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "1.2 Token sai chữ ký hoặc hết hạn → 401",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiJ0ZXN0IiwiZXhwIjoxNTE2MjM5MDIyfQ.chu-ky-khong-hop-le-va-token-da-het-han"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents"
+       ]
+      },
+      "description": "Token dưới đây vừa có exp ở quá khứ vừa sai chữ ký. Hệ thống cố ý trả cùng một thông điệp cho mọi kiểu token hỏng, để không giúp kẻ tấn công dò khóa.\n\nMuốn chứng minh riêng nhánh hết hạn: đặt JWT_EXPIRY_MINUTES=1 trong .env, chạy docker compose up -d api, đăng nhập rồi chờ hơn một phút."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+         "pm.test(\"Lỗi theo chuẩn ProblemDetails\", () => {",
+         "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+         "});",
+         "pm.test(\"Có correlationId để tra log\", () => {",
+         "  pm.expect(pm.response.json().correlationId).to.be.a(\"string\");",
+         "});"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "1.3 Sai mật khẩu → 401, thông điệp chung",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"identifier\": \"{{adminEmail}}\",\n  \"password\": \"chac-chan-sai\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/auth/login",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "auth",
+        "login"
+       ]
+      },
+      "description": "Không được phân biệt sai email với sai mật khẩu, nếu không đường đăng nhập trở thành công cụ dò xem email nào đã có tài khoản."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+         "pm.test(\"Không tiết lộ email có tồn tại hay không\", () => {",
+         "  const d = pm.response.json().detail.toLowerCase();",
+         "  pm.expect(d).to.not.include(\"không tìm thấy\");",
+         "  pm.expect(d).to.not.include(\"mật khẩu sai\");",
+         "});"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "1.4 Endpoint không khai báo quyền vẫn đòi đăng nhập → 401",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/auth/me",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "auth",
+        "me"
+       ]
+      },
+      "description": "FallbackPolicy khóa mặc định. Một action mới quên gắn permission sẽ bị chặn, chứ không âm thầm trở thành endpoint công khai."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "2. Phân quyền theo vai trò — 403",
+   "description": "Token hợp lệ, danh tính rõ ràng, nhưng thiếu permission. Phân biệt với nhóm 1: đây là 403 (biết anh là ai, anh không được phép), không phải 401.",
+   "item": [
+    {
+     "name": "2.1 Khách hàng đọc danh sách user → 403",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/users",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "users"
+       ]
+      },
+      "description": "user.read là quyền quản trị."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+         "pm.test(\"Lỗi theo chuẩn ProblemDetails\", () => {",
+         "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+         "});",
+         "pm.test(\"Có correlationId để tra log\", () => {",
+         "  pm.expect(pm.response.json().correlationId).to.be.a(\"string\");",
+         "});",
+         "pm.test(\"Nói rõ quyền còn thiếu\", () => pm.expect(pm.response.json().requiredPermission).to.eql(\"user.read\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "2.2 Khách hàng xóa sự cố của chính mình → 403",
+     "request": {
+      "method": "DELETE",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}"
+       ]
+      },
+      "description": "Sở hữu dữ liệu không đồng nghĩa với quyền xóa. incident.delete chỉ admin có."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "2.3 Khách hàng tự chuyển trạng thái sự cố của mình → 403",
+     "request": {
+      "method": "PATCH",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"targetStatus\": \"Mitigating\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}/status",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}",
+        "status"
+       ]
+      },
+      "description": "Ranh giới nghiệp vụ cốt lõi: dữ liệu là của khách hàng, nhưng quy trình xử lý thuộc về đội hỗ trợ."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "3. Cách ly theo project",
+   "description": "Khách A và khách B cùng vai trò customer, cùng bộ permission. Khác nhau đúng một điều: A đã tham gia project, B thì chưa. Mọi khác biệt về kết quả dưới đây đều đến từ ranh giới project chứ không từ vai trò.",
+   "item": [
+    {
+     "name": "3.1 B chưa tham gia project đọc sự cố của A → 403",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerBToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}"
+       ]
+      },
+      "description": "Cùng vai trò, cùng quyền trên giấy. Đây là ca mà kiểm tra theo vai trò không bắt được."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+         "pm.test(\"Lỗi theo chuẩn ProblemDetails\", () => {",
+         "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+         "});",
+         "pm.test(\"Có correlationId để tra log\", () => {",
+         "  pm.expect(pm.response.json().correlationId).to.be.a(\"string\");",
+         "});",
+         "pm.test(\"Quyền còn thiếu là incident.read\", () =>",
+         "  pm.expect(pm.response.json().requiredPermission).to.eql(\"incident.read\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.2 B đọc lịch sử sự cố của A → 403",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerBToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}/history",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}",
+        "history"
+       ]
+      },
+      "description": "Chặn được /{id} mà quên /history thì dữ liệu vẫn rò qua cửa sau."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.3 B gửi phản hồi vào project chưa tham gia → 403",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerBToken}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"Web\",\n  \"content\": \"Cố gắn phản hồi vào sự cố của người khác.\",\n  \"incidentId\": \"{{incidentAId}}\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/feedbacks",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "feedbacks"
+       ]
+      },
+      "description": "Cùng họ lỗi BOLA nhưng ở chiều ghi. Chặn chiều đọc mà quên chiều ghi thì vẫn hở."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+         "pm.test(\"Ranh giới chặn cả ghi\", () =>",
+         "  pm.expect(pm.response.json().requiredPermission).to.eql(\"feedback.create\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.4 Danh sách sự cố của B → 403",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerBToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents?page=1&pageSize=100",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents"
+       ],
+       "query": [
+        {
+         "key": "page",
+         "value": "1"
+        },
+        {
+         "key": "pageSize",
+         "value": "100"
+        }
+       ]
+      },
+      "description": "Chưa tham gia thì ngay cả danh sách cũng không mở — không phải trả 200 kèm danh sách rỗng."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 403\", () => pm.response.to.have.status(403));",
+         "pm.test(\"Quyền còn thiếu là incident.read\", () =>",
+         "  pm.expect(pm.response.json().requiredPermission).to.eql(\"incident.read\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.5 Đối chứng — A đã tham gia thì đọc được → 200",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}"
+       ]
+      },
+      "description": "Chặn đúng chỗ, không chặn nhầm. Thiếu ca này thì không phân biệt được 'phân quyền đúng' với 'hỏng toàn bộ'."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "pm.test(\"Đúng sự cố của mình\", () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get(\"incidentAId\")));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.6 Đối chứng — admin đọc được mọi sự cố → 200",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{adminToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}"
+       ]
+      },
+      "description": "admin có incident.read.all nên đi xuyên qua ràng buộc sở hữu."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.7 B tham gia project",
+     "request": {
+      "method": "PUT",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerBToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/project-catalog/{{project}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "project-catalog",
+        "{{project}}"
+       ]
+      },
+      "description": "Đổi đúng một biến của phép đối chứng: tư cách thành viên project."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 204\", () => pm.response.to.have.status(204));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "3.8 Đối chứng — B tham gia rồi thì đọc được → 200",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerBToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}"
+       ]
+      },
+      "description": "B không phải người gửi sự cố này. Sau khi tham gia project, B vẫn đọc được — chứng minh ranh giới là project chứ không phải quyền sở hữu."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "pm.test(\"Đúng sự cố của A\", () => pm.expect(pm.response.json().id)",
+         "  .to.eql(pm.collectionVariables.get(\"incidentAId\")));"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "4. Hardening — headers, rate limit, CORS",
+   "description": "Ba biện pháp không bảo vệ API khỏi client tự viết, nhưng bảo vệ trình duyệt của người dùng và làm chậm kẻ dò mật khẩu.",
+   "item": [
+    {
+     "name": "4.1 Security headers trên response thành công",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/health",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "health"
+       ]
+      },
+      "description": "Ba header phải có trên mọi response."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "const h = pm.response.headers;",
+         "pm.test(\"X-Content-Type-Options: nosniff\", () => pm.expect(h.get(\"X-Content-Type-Options\")).to.eql(\"nosniff\"));",
+         "pm.test(\"X-Frame-Options: DENY\", () => pm.expect(h.get(\"X-Frame-Options\")).to.eql(\"DENY\"));",
+         "pm.test(\"Referrer-Policy: no-referrer\", () => pm.expect(h.get(\"Referrer-Policy\")).to.eql(\"no-referrer\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "4.2 Security headers còn nguyên trên 401",
+     "request": {
+      "method": "GET",
+      "header": [],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents"
+       ]
+      },
+      "description": "Đây là chỗ header dễ mất nhất, vì response lỗi được dựng lại từ đầu."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 401\", () => pm.response.to.have.status(401));",
+         "const h = pm.response.headers;",
+         "pm.test(\"X-Content-Type-Options: nosniff\", () => pm.expect(h.get(\"X-Content-Type-Options\")).to.eql(\"nosniff\"));",
+         "pm.test(\"X-Frame-Options: DENY\", () => pm.expect(h.get(\"X-Frame-Options\")).to.eql(\"DENY\"));",
+         "pm.test(\"Referrer-Policy: no-referrer\", () => pm.expect(h.get(\"Referrer-Policy\")).to.eql(\"no-referrer\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "4.3 Rate limit đăng nhập → 429",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"identifier\": \"{{adminEmail}}\",\n  \"password\": \"co-tinh-sai-de-do-mat-khau\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/auth/login",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "auth",
+        "login"
+       ]
+      },
+      "description": "Bấm Send liên tiếp quá RATE_LIMIT_LOGIN_PER_MINUTE lần (mặc định 10) trong một phút; hoặc chạy request này bằng Collection Runner với 12 iteration.\n\nMuốn thấy 429 nhanh hơn: đặt RATE_LIMIT_LOGIN_PER_MINUTE=3 trong .env rồi docker compose up -d api."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"401 khi chưa vượt ngưỡng, 429 khi đã vượt\",",
+         "  () => pm.expect([401, 429]).to.include(pm.response.code));",
+         "if (pm.response.code === 429) {",
+         "  console.log(\"Rate limit đã chặn — đây là bằng chứng cần chụp.\");",
+         "} else {",
+         "  console.log(\"Chưa tới ngưỡng, bấm Send tiếp.\");",
+         "}"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "4.4 CORS chỉ nhận origin trong allowlist",
+     "request": {
+      "method": "OPTIONS",
+      "header": [
+       {
+        "key": "Origin",
+        "value": "http://ke-tan-cong.example"
+       },
+       {
+        "key": "Access-Control-Request-Method",
+        "value": "GET"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents"
+       ]
+      },
+      "description": "Preflight từ một origin lạ không được nhận header Access-Control-Allow-Origin.\n\nLưu ý: CORS là chính sách của trình duyệt, curl và Postman bỏ qua nó. CORS rộng không tạo lỗ hổng quyền, nhưng cũng không bao giờ thay được authorization."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"Origin lạ không được cấp phép\", () => {",
+         "  pm.expect(pm.response.headers.get(\"Access-Control-Allow-Origin\")).to.be.oneOf([null, undefined]);",
+         "});"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "5. Đối chứng — luồng xử lý hợp lệ",
+   "description": "Chứng minh phân quyền không chặn nhầm người có quyền, và ràng buộc người được giao hoạt động.",
+   "item": [
+    {
+     "name": "5.1 Admin nhận việc: Investigating → Mitigating",
+     "request": {
+      "method": "PATCH",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Authorization",
+        "value": "Bearer {{adminToken}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"targetStatus\": \"Mitigating\",\n  \"note\": \"Đã tìm ra nguyên nhân, đang triển khai bản vá.\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}/status",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}",
+        "status"
+       ]
+      },
+      "description": "Quy tắc tự nhận việc chỉ áp cho người không có incident.manage_any."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "const b = pm.response.json();",
+         "pm.test(\"Đã sang Mitigating\", () => pm.expect(b.status).to.eql(\"Mitigating\"));",
+         "pm.test(\"Báo bước hợp lệ tiếp theo\", () => pm.expect(b.allowedNextStatus).to.eql(\"Resolved\"));",
+         "",
+         "// Người thao tác đầu tiên tự nhận việc — TRỪ người có incident.manage_any.",
+         "// Admin thao tác nhân danh vận hành; gán họ làm người phụ trách là ghi sai",
+         "// người chịu trách nhiệm thật, nên assignee phải còn trống.",
+         "pm.test(\"Admin không tự nhận việc\", () => pm.expect(b.assignee).to.be.null);"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "5.2 Khách hàng A vẫn theo dõi được tiến độ → 200",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{customerAToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}"
+       ]
+      },
+      "description": "Người báo cáo vẫn giữ quyền đọc sau khi đội hỗ trợ nhận việc."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "pm.test(\"Thấy trạng thái mới\", () => pm.expect(pm.response.json().status).to.eql(\"Mitigating\"));"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "5.3 Admin đóng sự cố: Mitigating → Resolved",
+     "request": {
+      "method": "PATCH",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Authorization",
+        "value": "Bearer {{adminToken}}"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"targetStatus\": \"Resolved\",\n  \"note\": \"Đã vá xong và xác nhận với khách hàng.\"\n}"
+      },
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}/status",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}",
+        "status"
+       ]
+      },
+      "description": "Bước này đòi thêm permission incident.resolve."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "const b = pm.response.json();",
+         "pm.test(\"Đã đóng\", () => pm.expect(b.status).to.eql(\"Resolved\"));",
+         "pm.test(\"Ghi thời điểm đóng\", () => pm.expect(b.resolvedAt).to.not.be.null);",
+         "pm.test(\"Không còn bước nào tiếp theo\", () => pm.expect(b.allowedNextStatus).to.be.null);"
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "name": "5.4 Lịch sử đủ hai lần chuyển",
+     "request": {
+      "method": "GET",
+      "header": [
+       {
+        "key": "Authorization",
+        "value": "Bearer {{adminToken}}"
+       }
+      ],
+      "url": {
+       "raw": "{{baseUrl}}/api/projects/{{project}}/incidents/{{incidentAId}}/history",
+       "host": [
+        "{{baseUrl}}"
+       ],
+       "path": [
+        "api",
+        "projects",
+        "{{project}}",
+        "incidents",
+        "{{incidentAId}}",
+        "history"
+       ]
+      },
+      "description": "Mỗi lần chuyển sinh đúng một dòng, ghi cùng transaction với việc đổi trạng thái."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+         "const h = pm.response.json();",
+         "pm.test(\"Đúng hai dòng\", () => pm.expect(h.length).to.eql(2));",
+         "pm.test(\"Theo thứ tự thời gian\", () => {",
+         "  pm.expect(h[0].fromStatus).to.eql(\"Investigating\");",
+         "  pm.expect(h[0].toStatus).to.eql(\"Mitigating\");",
+         "  pm.expect(h[1].toStatus).to.eql(\"Resolved\");",
+         "});"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "variable": [
+  {
+   "key": "baseUrl",
+   "value": "http://localhost:8080"
+  },
+  {
+   "key": "project",
+   "value": "support"
+  },
+  {
+   "key": "adminEmail",
+   "value": "admin@gitissues.local"
+  },
+  {
+   "key": "adminPassword",
+   "value": "doi-mat-khau-admin-nay"
+  },
+  {
+   "key": "customerPassword",
+   "value": "Secret#12345"
+  },
+  {
+   "key": "runId",
+   "value": ""
+  },
+  {
+   "key": "customerAEmail",
+   "value": ""
+  },
+  {
+   "key": "customerBEmail",
+   "value": ""
+  },
+  {
+   "key": "adminToken",
+   "value": ""
+  },
+  {
+   "key": "customerAToken",
+   "value": ""
+  },
+  {
+   "key": "customerBToken",
+   "value": ""
+  },
+  {
+   "key": "customerAId",
+   "value": ""
+  },
+  {
+   "key": "incidentAId",
+   "value": ""
+  },
+  {
+   "key": "customerALogin",
+   "value": ""
+  },
+  {
+   "key": "customerBLogin",
+   "value": ""
+  }
+ ]
+}
