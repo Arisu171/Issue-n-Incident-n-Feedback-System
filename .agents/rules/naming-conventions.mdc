@@ -1,0 +1,56 @@
+---
+alwaysApply: true
+---
+
+# Naming Conventions (FE) — kebab-case / PascalCase rules
+
+## Scope
+These rules apply **only** to:
+- `apps/**`
+- `packages/**`
+
+## Rules
+
+### 1) React component files (`.tsx`)
+- `.tsx` files (React components / pages) are allowed to use **PascalCase**.
+
+Examples:
+- ✅ `Dormitories.tsx`
+- ✅ `ResidencyProfile.tsx`
+- ✅ `CurrentLocationCard.tsx`
+
+### 2) Non-React files (non-`.tsx`)
+- All **non-`.tsx`** files must be **kebab-case** (no uppercase letters).
+
+Examples:
+- ✅ `use-discipline-log-list.ts`
+- ✅ `timetable-utils.ts`
+- ❌ `useDisciplineLogList.ts`
+- ❌ `timetableUtils.ts`
+
+### 3) Directory names
+- Directory names should be **kebab-case** (no uppercase letters),
+  **except** for the exclusions listed below.
+
+Examples:
+- ✅ `organizational-structure/`
+- ❌ `organizational-structure/Chart/` (unless allowed by exclusions)
+
+## Exclusions (ignored from enforcement)
+These paths are excluded from the naming rule checks:
+
+1) Any `README.md` anywhere in `apps/**` or `packages/**`
+2) Any path under `public/`
+3) Any path under `components/` (entire subtree)
+4) Any `.tsx` page/component outside `components/` (page components)
+5) Allowed legacy directory set in LD org structure:
+   - `apps/ld/app/[locale]/organizational-structure/{Chart,Groups,JobPositions,Structure,Titles}/...`
+
+## Enforcement checklist
+When adding/changing files:
+- If file ends with `.tsx` → PascalCase is OK.
+- Otherwise → use kebab-case for file name.
+- Avoid uppercase letters in directory names unless covered by exclusions.
+
+## Notes
+- Case-only renames on Windows can be tricky. Prefer renaming via Git-aware tools and double-check imports.
