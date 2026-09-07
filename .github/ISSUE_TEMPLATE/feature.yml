@@ -1,0 +1,31 @@
+name: Đề xuất tính năng
+description: Đề xuất một năng lực mới
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Vấn đề
+      description: Mô tả vấn đề, không mô tả giải pháp. Ai đang gặp khó khăn gì?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Hướng giải quyết đề xuất
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Phương án khác đã cân nhắc
+      description: Kể cả phương án "không làm gì cả".
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Phạm vi ảnh hưởng
+      multiple: true
+      options:
+        - Backend API
+        - Giao diện web
+        - Cơ sở dữ liệu (cần migration)
+        - Hạ tầng / CI
+        - Chỉ tài liệu
