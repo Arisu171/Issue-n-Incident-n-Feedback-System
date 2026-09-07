@@ -1,0 +1,306 @@
+name: CI
+
+# Cổng kiểm chứng cho luồng issue → branch → commit → pull request → review → merge.
+on:
+  push:
+    branches: [main]
+    tags: ['week-*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  backend:
+    name: Backend — build, migration, test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        working-directory: backend
+        run: dotnet restore
+
+      - name: Build
+        working-directory: backend
+        run: dotnet build --no-restore -c Release
+
+      # Mục 5.7 — migration phải chạy được trên một PostgreSQL hoàn toàn rỗng.
+      - name: Migration chạy trên DB rỗng
+        working-directory: backend
+        env:
+          CONNECTIONSTRINGS__DEFAULT: Host=localhost;Port=5432;Database=migration_check;Username=postgres;Password=postgres
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE migration_check'
+          dotnet tool install --global dotnet-ef --version 8.0.11
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet ef database update \
+            --project src/IncidentTracker.Api/IncidentTracker.Api.csproj \
+            --context AppDbContext
+
+      - name: Test (unit + integration)
+        working-directory: backend
+        env:
+          TEST_DB_CONNECTION: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres
+        run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
+
+      # Log của job chỉ đọc được khi đã đăng nhập, còn annotation thì công khai. Bước này
+      # biến từng test đỏ thành một annotation, nên người không có quyền vào Actions vẫn biết
+      # CÁI GÌ hỏng chứ không chỉ "exit code 1".
+      - name: Nêu tên test đỏ
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          NS = {'t': 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010'}
+          found = 0
+          for path in glob.glob('**/TestResults/*.trx', recursive=True):
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception as exc:
+                  print('::warning::khong doc duoc %s: %s' % (path, exc))
+                  continue
+              for r in root.findall('.//t:UnitTestResult', NS):
+                  if r.get('outcome') != 'Failed':
+                      continue
+                  found += 1
+                  name = r.get('testName') or '?'
+                  msg = r.findtext('.//t:Message', default='', namespaces=NS) or ''
+                  msg = ' '.join(msg.split())[:600]
+                  print('::error title=%s::%s' % (name, msg))
+          if found == 0:
+              print('::warning::Khong tim thay test do trong tep .trx nao.')
+          PY
+
+      - name: Tải kết quả test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: backend/**/TestResults/*.trx
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend — typecheck, test và build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      # Tài liệu tuần 4 ghi hai lệnh này "chạy trong CI" — nhưng trước đây chúng KHÔNG có ở
+      # đây, nên kỷ luật i18n hoàn toàn không được ép. Một chuỗi tiếng Việt quên bọc `tr()` vẫn
+      # qua CI như thường; đã xảy ra thật.
+      - name: i18n — không thiếu bản dịch
+        working-directory: frontend
+        run: npm run i18n:missing
+
+      - name: i18n — không còn khoá thừa
+        working-directory: frontend
+        run: npm run i18n:stale
+
+      # Yêu cầu "Tất cả events 3 status" nằm hoàn toàn ở frontend, nên nó phải có cổng
+      # kiểm chứng tự động chứ không dựa vào việc ai đó nhớ kiểm tra bằng mắt.
+      - name: Test (ba trạng thái processing/success/failed)
+        working-directory: frontend
+        run: npm test
+
+      # Runner không có frontend/.env, mà lib/api.ts cố ý DỪNG build production khi thiếu
+      # NEXT_PUBLIC_API_BASE_URL — để một bản deploy quên đặt biến không âm thầm gọi localhost.
+      # Giá trị ở đây không quan trọng: job này chỉ kiểm build có sạch hay không.
+      - name: Build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+        run: npm run build
+
+  compose:
+    name: docker compose — ba service healthy
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # NFR-PORT-01 — bằng chứng cho tiêu chí "web, api, db healthy".
+      - name: Chuẩn bị .env
+        run: |
+          cp .env.example .env
+          sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 16)|" .env
+          sed -i "s|^JWT_SIGNING_KEY=.*|JWT_SIGNING_KEY=$(openssl rand -base64 48 | tr -d '\n')|" .env
+          sed -i "s|^SEED_ADMIN_PASSWORD=.*|SEED_ADMIN_PASSWORD=Admin#$(openssl rand -hex 8)|" .env
+          # Hai collection Postman đăng ký 7 tài khoản trong một lượt chạy, đều từ một IP.
+          # Trần production 5/giờ sẽ chặn từ tài khoản thứ sáu, nên nới trần riêng cho CI —
+          # rate limit ĐĂNG NHẬP giữ nguyên vì có một ca kiểm chứng 429 dựa vào nó.
+          sed -i "s|^RATE_LIMIT_REGISTER_PER_HOUR=.*|RATE_LIMIT_REGISTER_PER_HOUR=200|" .env
+
+      - name: docker compose up
+        run: docker compose up --build -d --wait --wait-timeout 300
+
+      - name: Kiểm tra trạng thái healthy của cả ba service
+        run: |
+          docker compose ps
+          for service in db api web; do
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q $service)")
+            echo "$service => $status"
+            [ "$status" = "healthy" ] || exit 1
+          done
+
+      # Yêu cầu "Có web, api, db healthy" — kiểm chứng bằng LỜI GỌI API, không phải bằng
+      # docker compose ps. Một endpoint duy nhất trả trạng thái cả ba service.
+      - name: Kiểm tra sức khỏe cả ba service qua API
+        run: |
+          curl -fsS http://localhost:8080/api/health/system -o /tmp/health.json
+          cat /tmp/health.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/health.json'))
+          checks = {c['name']: c['status'] for c in report['checks']}
+          print('trạng thái từng service:', checks)
+          assert report['status'] == 'Healthy', report['status']
+          for service in ('api', 'db', 'web'):
+              assert checks.get(service) == 'Healthy', f'{service} = {checks.get(service)}'
+          PY
+
+      - name: Kiểm tra endpoint health của compose và metrics
+        run: |
+          curl -fsS http://localhost:8080/api/health | grep -q '"status":"Healthy"'
+          curl -fsS http://localhost:3000/healthz > /dev/null
+          # Mục 6.9 — signal quan sát được phải phơi ra cho Prometheus.
+          curl -fsS http://localhost:8080/metrics | grep -q 'incident_sla_breached'
+
+      # Chạy chính collection mà người chấm sẽ mở bằng Postman.
+      - name: Chạy collection Postman bằng newman
+        run: |
+          docker run --rm --network host             -v "$PWD/infra/postman:/etc/newman"             postman/newman:alpine run /etc/newman/gitissues.postman_collection.json             --env-var "baseUrl=http://localhost:8080"             --env-var "adminEmail=$(grep '^SEED_ADMIN_EMAIL=' .env | cut -d= -f2-)"             --env-var "adminPassword=$(grep '^SEED_ADMIN_PASSWORD=' .env | cut -d= -f2-)"             --reporters cli --reporter-cli-no-banner
+
+      # Tuần 3 — kiểm thử âm JWT/RBAC/BOLA/429 (deliverable hardening).
+      - name: Chạy Postman tuần 3 (auth · RBAC · hardening)
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/infra/postman:/etc/newman" \
+            postman/newman:alpine run /etc/newman/week-3-auth-rbac.postman_collection.json \
+            --env-var "baseUrl=http://localhost:8080" \
+            --env-var "adminEmail=$(grep '^SEED_ADMIN_EMAIL=' .env | cut -d= -f2-)" \
+            --env-var "adminPassword=$(grep '^SEED_ADMIN_PASSWORD=' .env | cut -d= -f2-)" \
+            --reporters cli --reporter-cli-no-banner
+
+      # Yêu cầu kỹ thuật "OpenAPI 2 endpoint" — đặc tả phải mô tả tối thiểu hai endpoint.
+      - name: Đặc tả OpenAPI mô tả đủ endpoint
+        run: |
+          curl -fsS http://localhost:8080/swagger/v1/swagger.json -o /tmp/openapi.json
+          grep -q '"openapi"' /tmp/openapi.json
+          curl -fsS http://localhost:8080/swagger/index.html | grep -qi 'swagger-ui'
+          python3 - <<'PY'
+          import json
+          spec = json.load(open('/tmp/openapi.json'))
+          paths = spec['paths']
+          ops = sum(len(v) for v in paths.values())
+          print(f"OpenAPI mô tả {ops} operation trên {len(paths)} path")
+          assert len(paths) >= 2, "Đặc tả phải mô tả tối thiểu 2 endpoint"
+          assert ops >= 25, f"Bề mặt API tụt xuống {ops} operation"
+          PY
+
+      # Mặc định an toàn: đặc tả công khai giúp người lạ liệt kê toàn bộ bề mặt API, nên ngoài
+      # Development phải là hành vi chọn mới có chứ không phải mặc định.
+      - name: Ngoài Development thì mặc định không phơi Swagger
+        run: |
+          ASPNETCORE_ENVIRONMENT=Production docker compose up -d --wait --wait-timeout 180 api
+          docker compose exec -T api sh -c 'echo "môi trường: $ASPNETCORE_ENVIRONMENT"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/swagger/v1/swagger.json)" = "404"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/swagger/index.html)" = "404"
+          # Tắt tài liệu không được đụng gì tới nghiệp vụ.
+          curl -fsS http://localhost:8080/api/health | grep -q '"status":"Healthy"'
+
+      - name: Bật tường minh thì phơi được ở môi trường bất kỳ
+        run: |
+          ASPNETCORE_ENVIRONMENT=Production SWAGGER_ENABLED=true             docker compose up -d --wait --wait-timeout 180 api
+          curl -fsS http://localhost:8080/swagger/v1/swagger.json | grep -q '"openapi"'
+          curl -fsS http://localhost:8080/swagger/index.html | grep -qi 'swagger-ui'
+
+      # UC-08 — đường đăng ký công khai không được cho tự cấp quyền quản trị.
+      - name: Tự đăng ký không leo thang được đặc quyền
+        run: |
+          email="ci-$(date +%s)@demo.local"
+          stamp=$(date +%s)
+          curl -fsS -X POST http://localhost:8080/api/auth/register             -H 'Content-Type: application/json'             -d "{\"email\":\"ci-$stamp@demo.local\",\"username\":\"ci-$stamp\",\"displayName\":\"CI\",\"password\":\"Ci#12345678\",\"roles\":[\"admin\"],\"isActive\":true}"             -o /tmp/register.json
+          cat /tmp/register.json
+          python3 - <<'PY'
+          import json
+          body = json.load(open('/tmp/register.json'))
+          perms = body['session']['permissions']
+          assert body['roles'] == ['customer'], f"vai trò được cấp: {body['roles']}"
+          # Kiểm theo tính chất chứ không ghim danh sách: điều phải đúng là tài khoản tự đăng
+          # ký không chạm được quyền quản trị hay vòng đời xử lý sự cố.
+          for p in ('incident.update_status', 'incident.delete', 'user.manage',
+                    'role.manage', 'project.manage', 'project.member.manage'):
+              assert p not in perms, f'tự đăng ký mà có {p}'
+          for p in ('incident.create', 'incident.read', 'feedback.create'):
+              assert p in perms, f'thiếu quyền tự phục vụ {p}'
+          print('tài khoản tự đăng ký chỉ nhận:', body['roles'], perms)
+          PY
+
+      # Mục 6.6 — 401 và 403 phải cùng định dạng ProblemDetails với các lỗi khác.
+      - name: Kiểm tra error contract trên hệ thống đang chạy
+        run: |
+          code=$(curl -s -o /tmp/body.json -w '%{http_code}' http://localhost:8080/api/users)
+          test "$code" = "401"
+          grep -q '"correlationId"' /tmp/body.json
+          grep -q '"status":401' /tmp/body.json
+
+      # Mục 5.7 — bản sao lưu phải restore được, không chỉ tạo được.
+      - name: Diễn tập backup và restore
+        run: |
+          # Bản cũ chạy `yes Y | restore.sh | tee`: trạng thái của cả ống là của `tee`, nên
+          # restore.sh chết giữa chừng vẫn cho bước này xanh — một phép diễn tập không thể
+          # thất bại thì không chứng minh được gì. Bỏ hẳn ống: ASSUME_YES thay cho việc bơm
+          # câu trả lời qua stdin, nhờ đó mã thoát của restore.sh là mã thoát của bước này.
+          set -o pipefail
+          ./infra/scripts/backup.sh
+          dump=$(ls -t infra/backups/*.dump | head -1)
+          ASSUME_YES=1 ./infra/scripts/restore.sh "$dump" > /tmp/restore.log 2>&1
+          cat /tmp/restore.log
+          ! grep -q 'LỆCH' /tmp/restore.log
+
+      - name: Log khi thất bại
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Dọn dẹp
+        if: always()
+        run: docker compose down -v
