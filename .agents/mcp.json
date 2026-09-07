@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "antd-components": { "command": "bunx", "args": ["-y", "@jzone-mcp/antd-components-mcp"] },
+    "next-devtools": {
+      "command": "bunx",
+      "args": ["-y", "next-devtools-mcp@latest"]
+    },
+    "sequential-thinking": {
+      "command": "bunx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    }
+  }
+}

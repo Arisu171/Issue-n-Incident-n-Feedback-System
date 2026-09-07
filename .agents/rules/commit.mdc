@@ -1,0 +1,16 @@
+---
+description: 
+alwaysApply: true
+---
+
+Commit format: <type>(<scope>): <subject>
+
+Types allowed: feat, fix, refactor, perf, style, docs, test, chore, ci, revert
+- Use English
+- Present tense, imperative
+- No capital letter at start
+- No dot at the end
+- Max 72 chars for subject line
+- One commit = one purpose
+- Use refactor only when behavior does not change
+- Scope is optional (e.g., "feat:" or "feat(auth):")
