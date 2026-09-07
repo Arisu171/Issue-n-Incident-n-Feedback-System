@@ -1,0 +1,45 @@
+name: Báo lỗi
+description: Hệ thống hành xử khác với mong đợi
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Lỗ hổng bảo mật thì **đừng** dùng mẫu này — xem [SECURITY.md](../../SECURITY.md).
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Cách tái hiện
+      description: Các bước cụ thể để gặp lại lỗi.
+      placeholder: |
+        1. Đăng nhập bằng tài khoản có role responder
+        2. Mở sự cố đang ở Mitigating
+        3. Bấm "Chuyển sang Đã giải quyết"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Kết quả mong đợi
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Kết quả thực tế
+      description: Dán nguyên văn phản hồi lỗi nếu có.
+    validations:
+      required: true
+  - type: input
+    id: correlation
+    attributes:
+      label: correlationId
+      description: Mọi phản hồi lỗi của API đều mang trường này; nó giúp tra đúng dòng log.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Môi trường
+      placeholder: |
+        - Chạy bằng: docker compose / dotnet run
+        - Commit hoặc tag:
+        - Hệ điều hành:
