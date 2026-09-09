@@ -1,5 +1,7 @@
 using IncidentTracker.Api.Authorization;
 using IncidentTracker.Api.Common;
+using IncidentTracker.Api.Modules.Revisions;
+using IncidentTracker.Api.Modules.Tickets.Infrastructure;
 using IncidentTracker.Api.Modules.Tickets.Organization;
 using IncidentTracker.Api.Persistence;
 using Microsoft.AspNetCore.Mvc;
@@ -90,6 +92,68 @@ public sealed class IncidentsController : ControllerBase
         var created = await _incidents.CreateAsync(request, User.GetUserId(), await ScopeAsync(project, ct), ct);
         return CreatedAtAction(nameof(Get), new { project, id = created.Id }, created);
     }
+
+    /// <summary>
+    /// API-Incident-Update — sửa tiêu đề, mô tả, mức độ.
+    ///
+    /// Khoá bằng <c>incident.read</c> chứ không phải một permission riêng: câu hỏi "được sửa
+    /// bài của ai" là câu hỏi về **bản ghi**, không phải về loại hành động, nên nó thuộc về
+    /// <c>ResourceAccessRules</c> chứ không thuộc về bảng phân quyền — đúng chỗ module Ticket
+    /// đã đặt nó.
+    /// </summary>
+    [HttpPatch("{id:guid}")]
+    [RequirePermission(Permissions.IncidentRead)]
+    [ProducesResponseType(typeof(IncidentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<IncidentResponse>> Update(
+        string project, Guid id, UpdateIncidentRequest request, CancellationToken ct)
+    {
+        var updated = await _incidents.UpdateContentAsync(
+            id, request, User, await ScopeAsync(project, ct), Request, ct);
+        EntityTags.SetETag(Response, updated.Version);
+        return Ok(updated);
+    }
+
+    /// <summary>
+    /// API-Incident-EditClaim — "tôi đang mở form sửa sự cố này".
+    ///
+    /// <c>PUT</c> vì nó idempotent: gọi lại chỉ gia hạn chính chỗ đang giữ, và client gọi lại
+    /// theo nhịp chừng nào form còn mở.
+    /// </summary>
+    [HttpPut("{id:guid}/edit-claim")]
+    [RequirePermission(Permissions.IncidentRead)]
+    [ProducesResponseType(typeof(EditClaimResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<EditClaimResponse>> ClaimEdit(
+        string project, Guid id, CancellationToken ct)
+        => Ok(await _incidents.ClaimEditAsync(id, User, await ScopeAsync(project, ct), ct));
+
+    /// <summary>API-Incident-EditClaim-Release — đóng form thì trả chỗ lại.</summary>
+    [HttpDelete("{id:guid}/edit-claim")]
+    [RequirePermission(Permissions.IncidentRead)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ReleaseEdit(string project, Guid id, CancellationToken ct)
+    {
+        await _incidents.ReleaseEditAsync(id, User, await ScopeAsync(project, ct), ct);
+        return NoContent();
+    }
+
+    /// <summary>API-Incident-Revisions — ai đã sửa gì, từ giá trị nào sang giá trị nào.</summary>
+    [HttpGet("{id:guid}/revisions")]
+    [RequirePermission(Permissions.IncidentRead)]
+    [ProducesResponseType(typeof(IReadOnlyList<RevisionResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<IReadOnlyList<RevisionResponse>>> Revisions(
+        string project, Guid id, CancellationToken ct)
+        => Ok(await _incidents.GetRevisionsAsync(id, User, await ScopeAsync(project, ct), ct));
 
     /// <summary>
     /// API-Incident-Status · FR-BIZ-02/03/05.

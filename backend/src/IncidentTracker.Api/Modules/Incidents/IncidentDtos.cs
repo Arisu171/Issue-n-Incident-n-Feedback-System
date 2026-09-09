@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using IncidentTracker.Api.Authorization;
 using IncidentTracker.Api.Common;
 using IncidentTracker.Api.Domain;
+using IncidentTracker.Api.Modules.Revisions;
 
 namespace IncidentTracker.Api.Modules.Incidents;
 
@@ -17,6 +18,34 @@ public sealed class CreateIncidentRequest
 
     // Cố ý KHÔNG có Status và ReporterId: BR-BIZ-01 và BR-BIZ-04 cấm client quyết định
     // trạng thái khởi tạo lẫn người ghi nhận. Field lạ trong body bị bỏ qua khi bind.
+}
+
+/// <summary>
+/// PATCH nội dung sự cố — mọi trường tùy chọn, <c>null</c> = không đổi (cùng ngữ nghĩa với
+/// <c>PATCH /tickets/{n}</c>).
+///
+/// Cố ý KHÔNG có <c>Status</c>: vòng đời đi qua <c>PATCH /status</c> với state machine một
+/// chiều và lịch sử riêng của nó. Mở một đường thứ hai để đổi trạng thái là phá đúng thứ
+/// FR-BIZ-05 dựng lên.
+/// </summary>
+public sealed class UpdateIncidentRequest
+{
+    [MinLength(5), MaxLength(255)]
+    public string? Title { get; set; }
+
+    /// <summary>Chuỗi rỗng = xóa mô tả; bỏ trống trường = giữ nguyên.</summary>
+    [MaxLength(10_000)]
+    public string? Description { get; set; }
+
+    public IncidentSeverity? Severity { get; set; }
+
+    /// <summary>
+    /// Lý do sửa, đi vào mọi dòng lịch sử của lần sửa này. Tùy chọn với người tự sửa bài mình,
+    /// nhưng là thứ nên điền khi sửa bài người khác — dòng lịch sử trả lời được "vì sao" thì
+    /// mới thay được cho một cuộc tranh cãi sau này.
+    /// </summary>
+    [MaxLength(500)]
+    public string? Reason { get; set; }
 }
 
 public sealed class UpdateStatusRequest : IStatusTargetRequest
@@ -43,7 +72,11 @@ public sealed record IncidentResponse(
     UserRef? Resolver,
     bool IsDeleted,
     /// <summary>null khi sự cố đã đóng — lúc đó đồng hồ SLA đã dừng.</summary>
-    SlaStatus? Sla);
+    SlaStatus? Sla,
+    /// <summary>null khi nội dung còn nguyên bản. Lịch sử đầy đủ ở <c>GET {id}/revisions</c>.</summary>
+    EditSignature? LastEdit,
+    /// <summary>Phiên bản nội dung — đặt vào <c>If-Match: "v{version}"</c> khi lưu.</summary>
+    int Version);
 
 public sealed record UserRef(Guid Id, string DisplayName, string Email);
 

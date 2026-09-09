@@ -3,6 +3,7 @@ using System.Security.Claims;
 using IncidentTracker.Api.Authorization;
 using IncidentTracker.Api.Common;
 using IncidentTracker.Api.Domain;
+using IncidentTracker.Api.Modules.Revisions;
 using IncidentTracker.Api.Observability;
 using IncidentTracker.Api.Persistence;
 using Microsoft.AspNetCore.Authorization;
@@ -38,11 +39,14 @@ public sealed class IncidentService
     private readonly AppMetrics _metrics;
     private readonly TimeProvider _clock;
     private readonly IAuthorizationService _authorization;
+    private readonly ContentRevisionService _revisions;
+    private readonly EditClaimService _claims;
     private readonly ILogger<IncidentService> _logger;
 
     public IncidentService(AppDbContext db, ITransactionFaultHook faultHook,
         IOptionsMonitor<SlaOptions> sla, AppMetrics metrics, TimeProvider clock,
-        IAuthorizationService authorization, ILogger<IncidentService> logger)
+        IAuthorizationService authorization, ContentRevisionService revisions,
+        EditClaimService claims, ILogger<IncidentService> logger)
     {
         _db = db;
         _faultHook = faultHook;
@@ -50,6 +54,8 @@ public sealed class IncidentService
         _metrics = metrics;
         _clock = clock;
         _authorization = authorization;
+        _revisions = revisions;
+        _claims = claims;
         _logger = logger;
     }
 
@@ -81,6 +87,207 @@ public sealed class IncidentService
             reporterId, incident.Id, incident.Severity);
 
         return await LoadResponseAsync(incident.Id, ct);
+    }
+
+    // ---------------- Sửa nội dung ----------------
+
+    /// <summary>
+    /// Sửa tiêu đề, mô tả, mức độ — và ghi lại đúng những gì đã đổi.
+    ///
+    /// Ba điều được giữ cùng lúc, trong **một** transaction: nội dung mới, một dòng lịch sử cho
+    /// mỗi trường đã đổi, và chữ ký người sửa đóng lên chính bản ghi. Tách ra thì có đường để
+    /// nội dung đổi mà lịch sử không kịp ghi — và một lịch sử có lỗ thì không còn là bằng chứng.
+    ///
+    /// Khóa hàng bằng <c>SELECT ... FOR UPDATE</c> như <see cref="TransitionStatusAsync"/>: hai
+    /// người sửa cùng lúc thì người sau đọc được giá trị người trước vừa ghi, nên
+    /// <c>old_value</c> trong lịch sử luôn là giá trị thật ngay trước đó chứ không phải một
+    /// bản chụp đã cũ.
+    /// </summary>
+    public async Task<IncidentResponse> UpdateContentAsync(
+        Guid incidentId, UpdateIncidentRequest request, ClaimsPrincipal caller,
+        Guid? projectId, HttpRequest http, CancellationToken ct)
+    {
+        var actorId = caller.GetUserId();
+        var strategy = _db.Database.CreateExecutionStrategy();
+        var changedFields = string.Empty;
+        var onBehalf = false;
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
+
+            var incident = await LockAsync(incidentId, ct)
+                ?? throw AppException.NotFound($"Không tìm thấy sự cố '{incidentId}'.");
+            EnsureInScope(incident, projectId);
+
+            // Đọc được trước đã: không ai sửa được thứ mình còn không được nhìn.
+            await EnsureCanReadAsync(incident, caller);
+
+            EnsureCanEditContent(incident, caller);
+
+            // Cửa chiếm dụng: có người khác đang mở form sửa sự cố này thì lần ghi này bắt buộc
+            // mang If-Match đúng phiên bản. Đặt **sau** khi đã khoá hàng, nếu không thì phiên
+            // bản đem ra so là bản chụp cũ và phép kiểm chỉ còn là trang trí.
+            await _claims.EnsureWritableAsync(http, EditableEntityType.Incident, incident.Id,
+                incident.Version, actorId, "Sự cố", ct);
+
+            onBehalf = incident.ReporterId != actorId;
+
+            var edit = _revisions.Begin(
+                EditableEntityType.Incident, incident.Id, incident,
+                actorId, incident.ReporterId, request.Reason);
+
+            if (request.Title is not null)
+            {
+                var title = request.Title.Trim();
+
+                // Kiểm SAU khi cắt khoảng trắng: DataAnnotations đo chuỗi gốc, nên "     x" lọt
+                // qua tầng bind rồi mới vi phạm check constraint của bảng — 500 thay vì 400.
+                if (title.Length is < 5 or > 255)
+                {
+                    throw AppException.BadRequest("Tiêu đề phải dài từ 5 đến 255 ký tự.");
+                }
+
+                edit.Change("title", incident.Title, title);
+                incident.Title = title;
+            }
+
+            if (request.Description is not null)
+            {
+                var description = string.IsNullOrWhiteSpace(request.Description)
+                    ? null
+                    : request.Description.Trim();
+                edit.Change("description", incident.Description, description);
+                incident.Description = description;
+            }
+
+            if (request.Severity is { } severity)
+            {
+                edit.Change("severity", incident.Severity, severity);
+                incident.Severity = severity;
+            }
+
+            if (edit.Record())
+            {
+                changedFields = edit.ChangedFields();
+                await _db.SaveChangesAsync(ct);
+            }
+            else
+            {
+                changedFields = string.Empty;
+            }
+
+            await tx.CommitAsync(ct);
+            return true;
+        });
+
+        if (changedFields.Length > 0)
+        {
+            // NFR-SEC-02: ghi tên trường, không bao giờ ghi nội dung — mô tả sự cố có thể chứa PII.
+            _logger.LogInformation(
+                "Audit incident.edit actor={ActorId} incident={IncidentId} fields={Fields} onBehalf={OnBehalf} result=success",
+                actorId, incidentId, changedFields, onBehalf);
+        }
+
+        return await LoadResponseAsync(incidentId, ct);
+    }
+
+    /// <summary>
+    /// Lịch sử sửa nội dung. Cùng ràng buộc đọc với bản ghi cha và cùng lý do với
+    /// <see cref="GetHistoryAsync"/>: chặn được <c>/incidents/{id}</c> mà để hở
+    /// <c>/revisions</c> thì nội dung cũ vẫn rò ra nguyên vẹn.
+    ///
+    /// Bỏ qua query filter để sự cố đã xóa mềm vẫn tra cứu được — bằng chứng không biến mất
+    /// cùng bản ghi (ADR-003).
+    /// </summary>
+    public async Task<IReadOnlyList<RevisionResponse>> GetRevisionsAsync(
+        Guid incidentId, ClaimsPrincipal caller, Guid? projectId, CancellationToken ct)
+    {
+        var incident = await _db.Incidents.AsNoTracking().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(i => i.Id == incidentId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy sự cố '{incidentId}'.");
+        EnsureInScope(incident, projectId);
+
+        await EnsureCanReadAsync(incident, caller);
+
+        return await _revisions.ListAsync(EditableEntityType.Incident, incidentId, ct);
+    }
+
+
+    /// <summary>
+    /// Nhận hoặc gia hạn chỗ sửa trên một sự cố — client gọi khi mở form và gọi lại theo nhịp
+    /// để giữ.
+    ///
+    /// Đòi đúng quyền như đường <c>PATCH</c>: người không sửa được thì cũng không chiếm dụng
+    /// được. Thiếu vế này thì bất kỳ ai đọc được sự cố cũng ép được cả đội phải gửi
+    /// <c>If-Match</c> — một đường quấy rối không tốn gì để thực hiện.
+    /// </summary>
+    public async Task<EditClaimResponse> ClaimEditAsync(
+        Guid incidentId, ClaimsPrincipal caller, Guid? projectId, CancellationToken ct)
+    {
+        var incident = await LoadEditableAsync(incidentId, caller, projectId, ct);
+        return await _claims.ClaimAsync(
+            EditableEntityType.Incident, incidentId, incident.Version, caller.GetUserId(), ct);
+    }
+
+    /// <summary>
+    /// Nhả chỗ sửa. Cố ý **không** đòi quyền sửa: thao tác này chỉ xoá đúng hàng của chính
+    /// người gọi, và một người vừa bị gỡ quyền vẫn phải nhả được chỗ mình đang chiếm — nếu
+    /// không, chỗ đó treo tới lúc hết hạn.
+    /// </summary>
+    public async Task ReleaseEditAsync(
+        Guid incidentId, ClaimsPrincipal caller, Guid? projectId, CancellationToken ct)
+    {
+        var incident = await _db.Incidents.AsNoTracking().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(i => i.Id == incidentId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy sự cố '{incidentId}'.");
+        EnsureInScope(incident, projectId);
+        await EnsureCanReadAsync(incident, caller);
+
+        await _claims.ReleaseAsync(EditableEntityType.Incident, incidentId, caller.GetUserId(), ct);
+    }
+
+    /// <summary>Nạp sự cố và soát trọn bộ điều kiện để được sửa nội dung của nó.</summary>
+    private async Task<Incident> LoadEditableAsync(
+        Guid incidentId, ClaimsPrincipal caller, Guid? projectId, CancellationToken ct)
+    {
+        var incident = await BaseQuery().FirstOrDefaultAsync(i => i.Id == incidentId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy sự cố '{incidentId}'.");
+        EnsureInScope(incident, projectId);
+        await EnsureCanReadAsync(incident, caller);
+        EnsureCanEditContent(incident, caller);
+        return incident;
+    }
+
+    /// <summary>
+    /// Một cửa duy nhất cho câu hỏi "người này sửa được nội dung sự cố này không".
+    ///
+    /// Cả đường <c>PATCH</c> lẫn đường giữ chỗ đều đi qua đây: hai phép kiểm viết hai lần là
+    /// cách chắc chắn nhất để chúng lệch nhau, và khi lệch thì cái rộng hơn thắng.
+    /// </summary>
+    private static void EnsureCanEditContent(Incident incident, ClaimsPrincipal caller)
+    {
+        if (!ResourceAccessRules.CanEditIncidentContent(caller, incident.ReporterId))
+        {
+            throw new AppException(
+                StatusCodes.Status403Forbidden,
+                "Không đủ quyền",
+                "Chỉ người báo cáo sự cố mới sửa được nội dung của nó, hoặc cần permission "
+                + $"'{Permissions.IncidentManageAny}'.",
+                new Dictionary<string, object?>
+                {
+                    ["requiredPermission"] = Permissions.IncidentManageAny,
+                    ["reporterId"] = incident.ReporterId
+                });
+        }
+
+        // Xóa mềm là trạng thái cuối của một bản ghi. Cho sửa nội dung sau đó thì bằng chứng
+        // SLA mà ADR-003 cố giữ lại sẽ nói về một sự cố đã khác với lúc nó xảy ra.
+        if (incident.IsDeleted)
+        {
+            throw AppException.Conflict("Sự cố đã bị xóa mềm nên không sửa được nội dung.");
+        }
     }
 
     // ---------------- UC-BIZ-02/03 · Chuyển trạng thái ----------------
@@ -528,7 +735,8 @@ public sealed class IncidentService
         => _db.Incidents.AsNoTracking()
             .Include(i => i.Reporter)
             .Include(i => i.Assignee)
-            .Include(i => i.Resolver);
+            .Include(i => i.Resolver)
+            .Include(i => i.LastEditor);
 
     /// <summary>
     /// Khóa hàng trong phạm vi transaction hiện hành. Bỏ qua query filter để sự cố đã xóa mềm
@@ -559,7 +767,9 @@ public sealed class IncidentService
             ToRef(i.Reporter)!, ToRef(i.Assignee),
             i.CreatedAt, i.MitigatingAt, i.ResolvedAt, ToRef(i.Resolver), i.IsDeleted,
             SlaEvaluator.Evaluate(_sla.CurrentValue, i.Status, i.CreatedAt, i.MitigatingAt,
-                _clock.GetUtcNow()));
+                _clock.GetUtcNow()),
+            ContentRevisionService.SignatureOf(i.LastEditedAt, i.LastEditor),
+            i.Version);
 
     private static UserRef? ToRef(User? user)
         => user is null ? null : new UserRef(user.Id, user.DisplayName, user.Email);
