@@ -80,6 +80,9 @@ sách tên miền và rate limit.
 - **Phản hồi lỗi không lộ chi tiết nội bộ.** Không stack trace, không chuỗi kết nối. Thay vào
   đó là `correlationId` để tra log.
 - **Lịch sử trạng thái chỉ ghi thêm.** Không có endpoint nào sửa hay xóa được.
+- **Lịch sử sửa nội dung cũng chỉ ghi thêm.** Mọi lần sửa sự cố, bình luận hay phản hồi đều ghi
+  giá trị cũ, giá trị mới và người sửa vào `content_revisions`, trong cùng transaction với việc
+  đổi nội dung. Không có endpoint nào sửa hay xóa hàng của bảng đó.
 
 ### Bề mặt tấn công
 

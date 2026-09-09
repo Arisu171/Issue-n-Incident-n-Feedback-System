@@ -91,7 +91,74 @@ B là thứ không màn hình nào biết bày ở đâu.
 **Cái giá.** Người có quyền toàn cục chạm được cả hai project nên chính họ là người làm vỡ bất biến
 này nếu không chặn — phép kiểm phải nằm ở chỗ gắn, không phải ở giao diện.
 
-### 2.3 Xoá dự án chỉ khi rỗng
+### 2.3 Nội dung sửa được, nhưng mỗi lần sửa để lại một dòng lịch sử ký tên
+
+**Quyết định.** Sự cố, bình luận sự cố, phản hồi khách hàng và câu trả lời đều sửa được qua
+`PATCH`. Mỗi **trường** đổi giá trị sinh một hàng trong `content_revisions` — giá trị cũ, giá trị
+mới, người sửa, thời điểm, và cờ `on_behalf` khi người sửa không phải chủ bản ghi. Ghi trong cùng
+transaction với việc đổi nội dung. Bảng đó chỉ ghi thêm: không endpoint nào sửa hay xoá được hàng
+của nó.
+
+Ai được sửa thì theo đúng luật module Ticket vẫn dùng — **tác giả, hoặc người có quyền cấp cao của
+chính module đó**: `incident.manage_any` cho sự cố và bình luận sự cố, `feedback.respond` cho phản
+hồi và câu trả lời. Cố ý **không** dùng `feedback.read.all`: đọc-được-tất-cả là quyền xem, không
+phải quyền viết lại lời khách hàng.
+
+**Vì sao.** Bản đầu không cho sửa gì cả, và điều đó bảo vệ được bằng chứng bằng cách khiến mọi lỗi
+chính tả trở thành vĩnh viễn — người dùng đối phó bằng cách gửi thêm một bản ghi mới nói "bản trên
+sai", tức là đúng thứ làm hỏng dữ liệu mà lệnh cấm định bảo vệ. Cho sửa **kèm lịch sử** giữ được cả
+hai: nội dung hiện tại đúng, và nguyên văn cũ vẫn dựng lại được kèm tên người đã thay nó.
+
+Ba thứ cố ý nằm ngoài: **trạng thái sự cố** (vòng đời một chiều đi qua `PATCH /status` với lịch sử
+riêng của nó), **liên kết phản hồi–sự cố** (đã có `POST/DELETE /link` với ràng buộc riêng), và **lời
+xác nhận tự động** (không có tác giả để đứng tên, và nó là bản sao đúng câu hệ thống đã gửi cho
+khách — sửa nó là sửa lại quá khứ; chặn cả ở tầng service lẫn check constraint).
+
+**Cái giá.** Một bảng lịch sử chung cho bốn thực thể nên **không có khoá ngoại tới bản ghi cha** —
+đánh đổi có chủ ý, vì lịch sử phải sống sót qua việc bản ghi cha bị xoá, đúng như
+`incident_status_history` đã cố ý không gắn query filter. Thêm vào đó, mỗi bản ghi mang thêm hai cột
+`last_edited_at`/`last_edited_by` trùng lặp với hàng mới nhất trong bảng lịch sử: nhãn "đã sửa" phải
+hiện trên mọi hàng của danh sách, và tính lại bằng truy vấn gộp cho mỗi trang là đổi một nhãn nhỏ
+lấy một phép join không cần thiết.
+
+### 2.4 `If-Match` bắt buộc — nhưng chỉ khi bản ghi đang bị người khác chiếm dụng để sửa
+
+**Quyết định.** Mở form sửa thì client gọi `PUT …/edit-claim` và gia hạn mỗi 45 giây; đóng form thì
+`DELETE`. Chừng nào còn **người khác** giữ chỗ chưa hết hạn (TTL 120 giây, `EditClaims:TtlSeconds`),
+mọi `PATCH` lên bản ghi đó **buộc** phải mang `If-Match: "v{version}"` — thiếu header trả `428`,
+lệch phiên bản trả `412`, và `*` không thay thế được vì nó chỉ khẳng định bản ghi tồn tại. Không ai
+giữ chỗ thì `If-Match` vẫn được tôn trọng nếu client gửi, nhưng không bắt buộc — đúng hành vi module
+Ticket vẫn có.
+
+`version` tăng đúng một bước cho mỗi lần **nội dung** đổi, ở đúng một chỗ (`EditDraft.Record`), và
+cố ý đứng yên khi đổi trạng thái, người xử lý hay liên kết: nó trả lời câu hỏi "form tôi đang mở còn
+khớp không", mà những thao tác kia không đụng vào ô nào trong form đó. Bắt chúng bump phiên bản chỉ
+đẻ ra `412` giả.
+
+**Vì sao có điều kiện chứ không bắt buộc luôn.** Bắt buộc mọi lúc thì mọi client — kể cả một dòng
+`curl` sửa một lỗi chính tả — phải đi hai vòng gọi. Cái giá đó chỉ đáng trả đúng lúc có tranh chấp
+thật, và chỗ giữ là thứ nói cho hệ thống biết lúc nào là lúc đó.
+
+**Vì sao không khoá cứng.** Khoá cứng thì một tab quên đóng là bản ghi chết cứng, và luôn phải kèm
+một nút "phá khoá" mà rốt cuộc ai cũng bấm — tức là quay về chỗ cũ, chỉ thêm vài bước. Siết điều
+kiện ghi giữ được điều thật sự quan trọng (không ai ghi đè lên bản mình chưa nhìn thấy) mà không
+dựng thêm một cánh cửa phải có chìa.
+
+**Cái giá.** Ba thứ, đều có chủ ý:
+- **Khoá chính của `edit_claims` gồm cả người giữ**, nên hai người cùng mở form là hai hàng và
+  **cả hai** đều bị siết. Một hàng duy nhất mỗi bản ghi sẽ chỉ siết người đến sau, trong khi người
+  đến trước mới là người ngồi lâu nhất trên một form cũ.
+- **Chỗ giữ hết hạn bằng `expires_at`, không bằng một job nền.** Hàng hết hạn mất hiệu lực ngay vì
+  mọi truy vấn đều lọc theo cột đó; việc dọn chỉ để bảng khỏi phình nên làm nhân tiện lúc có ai đụng
+  tới cùng bản ghi.
+- **Giữ chỗ đòi đúng quyền như đường ghi.** Thiếu vế này thì bất kỳ ai đọc được bản ghi cũng ép được
+  cả đội phải gửi `If-Match` — một đường quấy rối không tốn gì để thực hiện.
+
+Nhịp gia hạn hiện đi bằng HTTP. SignalR đã có sẵn cho module Ticket và sẽ hợp hơn (đẩy thay vì hỏi),
+nhưng nó buộc chỗ giữ phải sống theo vòng đời một kết nối realtime — một bộ phận chuyển động nữa cho
+thứ mà một cột `expires_at` đang làm đúng.
+
+### 2.5 Xoá dự án chỉ khi rỗng
 
 **Quyết định.** Còn ticket / sự cố / phản hồi → `409` kèm số lượng từng loại. Muốn dọn thì **lưu trữ**.
 

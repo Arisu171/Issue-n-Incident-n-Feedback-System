@@ -22,6 +22,12 @@ chặt và có bằng chứng:
 - **Truy vết không thể mất.** Mỗi lần chuyển trạng thái thành công sinh **đúng một** dòng lịch
   sử, ghi trong cùng transaction với việc đổi trạng thái. Bản ghi lịch sử chỉ ghi thêm, không có
   endpoint nào sửa hay xóa được.
+- **Sửa được, nhưng không sửa lén.** Nội dung sự cố, bình luận và phản hồi khách hàng đều sửa được
+  — và mỗi trường đổi giá trị để lại một dòng lịch sử ghi nguyên văn cũ kèm tên người bấm nút, kể cả
+  khi chính tác giả sửa bài mình. Sửa bài người khác thì dòng đó mang thêm dấu "sửa hộ".
+- **Hai người cùng sửa thì không ai mất chữ.** Mở form sửa là giữ một chỗ; chừng nào còn người khác
+  đang giữ chỗ, lần ghi kế tiếp buộc phải kèm `If-Match` đúng phiên bản — ghi đè lặng lẽ không còn
+  là một đường đi được. Ngoài lúc tranh chấp, mọi thứ vẫn nhẹ như cũ.
 - **Phân quyền là dữ liệu, không phải mã.** Quản trị viên thêm quyền, tạo vai trò và gán quyền
   hoàn toàn qua giao diện — không sửa mã, không migration, không triển khai lại.
 
