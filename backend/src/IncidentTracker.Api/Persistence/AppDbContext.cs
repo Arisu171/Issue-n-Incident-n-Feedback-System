@@ -36,6 +36,8 @@ public partial class AppDbContext : DbContext
     public DbSet<IncidentComment> IncidentComments => Set<IncidentComment>();
     public DbSet<Feedback> Feedbacks => Set<Feedback>();
     public DbSet<FeedbackReply> FeedbackReplies => Set<FeedbackReply>();
+    public DbSet<ContentRevision> ContentRevisions => Set<ContentRevision>();
+    public DbSet<EditClaim> EditClaims => Set<EditClaim>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -46,6 +48,7 @@ public partial class AppDbContext : DbContext
         var severityConverter = new EnumToStringConverter<IncidentSeverity>();
         var channelConverter = new EnumToStringConverter<FeedbackChannel>();
         var feedbackStatusConverter = new EnumToStringConverter<FeedbackStatus>();
+        var revisionEntityConverter = new EnumToStringConverter<EditableEntityType>();
 
         // ---------- ENT-User ----------
         b.Entity<User>(e =>
@@ -206,6 +209,7 @@ public partial class AppDbContext : DbContext
                 // mitigating_at chỉ có giá trị từ bước Mitigating trở đi.
                 t.HasCheckConstraint("ck_incidents_mitigating_at",
                     "mitigating_at is null or status in ('Mitigating','Resolved')");
+                t.HasCheckConstraint("ck_incidents_last_edit_pairing", LastEditPairing);
             });
 
             e.HasKey(x => x.Id);
@@ -233,7 +237,13 @@ public partial class AppDbContext : DbContext
             e.Property(x => x.ResolvedBy).HasColumnName("resolved_by");
             e.Property(x => x.IsDeleted).HasColumnName("is_deleted")
                 .HasDefaultValue(false).ValueGeneratedNever();
+            e.Property(x => x.LastEditedAt).HasColumnName("last_edited_at");
+            e.Property(x => x.LastEditedBy).HasColumnName("last_edited_by");
+            e.Property(x => x.Version).HasColumnName("version")
+                .HasDefaultValue(0).ValueGeneratedNever();
 
+            e.HasOne(x => x.LastEditor).WithMany()
+                .HasForeignKey(x => x.LastEditedBy).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Reporter).WithMany()
                 .HasForeignKey(x => x.ReporterId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Assignee).WithMany()
@@ -292,8 +302,12 @@ public partial class AppDbContext : DbContext
         // ---------- ENT-IncidentComment ----------
         b.Entity<IncidentComment>(e =>
         {
-            e.ToTable("incident_comments", t => t.HasCheckConstraint(
-                "ck_incident_comments_body_length", "char_length(body) between 1 and 2000"));
+            e.ToTable("incident_comments", t =>
+            {
+                t.HasCheckConstraint(
+                    "ck_incident_comments_body_length", "char_length(body) between 1 and 2000");
+                t.HasCheckConstraint("ck_incident_comments_last_edit_pairing", LastEditPairing);
+            });
 
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
@@ -301,7 +315,13 @@ public partial class AppDbContext : DbContext
             e.Property(x => x.AuthorId).HasColumnName("author_id");
             e.Property(x => x.Body).HasColumnName("body").HasMaxLength(2000).IsRequired();
             e.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+            e.Property(x => x.LastEditedAt).HasColumnName("last_edited_at");
+            e.Property(x => x.LastEditedBy).HasColumnName("last_edited_by");
+            e.Property(x => x.Version).HasColumnName("version")
+                .HasDefaultValue(0).ValueGeneratedNever();
 
+            e.HasOne(x => x.LastEditor).WithMany()
+                .HasForeignKey(x => x.LastEditedBy).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Incident).WithMany(i => i.Comments)
                 .HasForeignKey(x => x.IncidentId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Author).WithMany()
@@ -325,6 +345,7 @@ public partial class AppDbContext : DbContext
                 t.HasCheckConstraint("ck_feedbacks_content_length", "char_length(content) >= 10");
                 t.HasCheckConstraint("ck_feedbacks_customer_email_format",
                     "customer_email is null or customer_email ~ " + EmailPattern);
+                t.HasCheckConstraint("ck_feedbacks_last_edit_pairing", LastEditPairing);
             });
 
             e.HasKey(x => x.Id);
@@ -345,7 +366,13 @@ public partial class AppDbContext : DbContext
             e.Property(x => x.IncidentId).HasColumnName("incident_id");
             e.Property(x => x.CreatedBy).HasColumnName("created_by");
             e.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+            e.Property(x => x.LastEditedAt).HasColumnName("last_edited_at");
+            e.Property(x => x.LastEditedBy).HasColumnName("last_edited_by");
+            e.Property(x => x.Version).HasColumnName("version")
+                .HasDefaultValue(0).ValueGeneratedNever();
 
+            e.HasOne(x => x.LastEditor).WithMany()
+                .HasForeignKey(x => x.LastEditedBy).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Incident).WithMany(i => i.Feedbacks)
                 .HasForeignKey(x => x.IncidentId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne(x => x.CreatedByUser).WithMany()
@@ -369,6 +396,12 @@ public partial class AppDbContext : DbContext
                 // trường hợp thứ ba "vô danh".
                 t.HasCheckConstraint("ck_feedback_replies_author",
                     "is_automatic = true or responder_id is not null");
+                t.HasCheckConstraint("ck_feedback_replies_last_edit_pairing", LastEditPairing);
+                // Lời xác nhận tự động không có tác giả nên cũng không có ai sửa được nó.
+                // Ràng buộc ở tầng DB để một lỗi ở tầng service không lặng lẽ viết lại lời
+                // mà hệ thống đã gửi cho khách.
+                t.HasCheckConstraint("ck_feedback_replies_automatic_immutable",
+                    "is_automatic = false or last_edited_at is null");
             });
 
             e.HasKey(x => x.Id);
@@ -379,7 +412,13 @@ public partial class AppDbContext : DbContext
             e.Property(x => x.IsAutomatic).HasColumnName("is_automatic")
                 .HasDefaultValue(false).ValueGeneratedNever();
             e.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+            e.Property(x => x.LastEditedAt).HasColumnName("last_edited_at");
+            e.Property(x => x.LastEditedBy).HasColumnName("last_edited_by");
+            e.Property(x => x.Version).HasColumnName("version")
+                .HasDefaultValue(0).ValueGeneratedNever();
 
+            e.HasOne(x => x.LastEditor).WithMany()
+                .HasForeignKey(x => x.LastEditedBy).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Feedback).WithMany(f => f.Replies)
                 .HasForeignKey(x => x.FeedbackId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Responder).WithMany()
@@ -387,6 +426,77 @@ public partial class AppDbContext : DbContext
 
             e.HasIndex(x => new { x.FeedbackId, x.CreatedAt })
                 .HasDatabaseName("ix_feedback_replies_feedback_created_at");
+        });
+
+        // ---------- ENT-ContentRevision ----------
+        b.Entity<ContentRevision>(e =>
+        {
+            e.ToTable("content_revisions", t =>
+            {
+                t.HasCheckConstraint("ck_content_revisions_entity_type",
+                    "entity_type in ('Incident','IncidentComment','Feedback','FeedbackReply')");
+                t.HasCheckConstraint("ck_content_revisions_field_format",
+                    "field ~ '^[a-z][a-z0-9_]*$'");
+                // Một dòng lịch sử không nói được điều gì đã đổi là rác, không phải bằng chứng.
+                t.HasCheckConstraint("ck_content_revisions_changed",
+                    "old_value is distinct from new_value");
+                t.HasCheckConstraint("ck_content_revisions_reason_length",
+                    "reason is null or char_length(reason) between 1 and 500");
+            });
+
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.EntityType).HasColumnName("entity_type").HasMaxLength(30)
+                .HasConversion(revisionEntityConverter).IsRequired();
+            e.Property(x => x.EntityId).HasColumnName("entity_id");
+            e.Property(x => x.Field).HasColumnName("field").HasMaxLength(40).IsRequired();
+            e.Property(x => x.OldValue).HasColumnName("old_value");
+            e.Property(x => x.NewValue).HasColumnName("new_value");
+            e.Property(x => x.EditedBy).HasColumnName("edited_by");
+            e.Property(x => x.EditedAt).HasColumnName("edited_at").HasDefaultValueSql("now()");
+            e.Property(x => x.OnBehalf).HasColumnName("on_behalf")
+                .HasDefaultValue(false).ValueGeneratedNever();
+            e.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(500);
+
+            e.HasOne(x => x.EditedByUser).WithMany()
+                .HasForeignKey(x => x.EditedBy).OnDelete(DeleteBehavior.Restrict);
+
+            // Cố ý KHÔNG có khóa ngoại tới bản ghi cha: lịch sử phải sống sót qua việc bản ghi
+            // cha bị xóa, cùng lý do đã áp cho incident_status_history (ADR-003).
+            e.HasIndex(x => new { x.EntityType, x.EntityId, x.EditedAt })
+                .HasDatabaseName("ix_content_revisions_entity");
+        });
+
+        // ---------- ENT-EditClaim ----------
+        b.Entity<EditClaim>(e =>
+        {
+            e.ToTable("edit_claims", t =>
+            {
+                t.HasCheckConstraint("ck_edit_claims_entity_type",
+                    "entity_type in ('Incident','IncidentComment','Feedback','FeedbackReply')");
+                // Một chỗ giữ đã hết hạn trước cả khi được ghi là vô nghĩa.
+                t.HasCheckConstraint("ck_edit_claims_expiry", "expires_at > claimed_at");
+            });
+
+            // Khoá chính gồm cả người giữ: hai người cùng mở form là hai hàng, và cả hai đều
+            // nhìn thấy phía kia. Xem chú thích của ENT-EditClaim.
+            e.HasKey(x => new { x.EntityType, x.EntityId, x.UserId });
+            e.Property(x => x.EntityType).HasColumnName("entity_type").HasMaxLength(30)
+                .HasConversion(revisionEntityConverter).IsRequired();
+            e.Property(x => x.EntityId).HasColumnName("entity_id");
+            e.Property(x => x.UserId).HasColumnName("user_id");
+            e.Property(x => x.ClaimedAt).HasColumnName("claimed_at").HasDefaultValueSql("now()");
+            e.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+
+            // Cascade chứ không Restrict: chỗ giữ là trạng thái tạm của một phiên làm việc, không
+            // phải bằng chứng. Xoá tài khoản thì nó đi theo — khác hẳn content_revisions, nơi
+            // chữ ký phải ở lại và vì vậy mới chặn việc xoá.
+            e.HasOne(x => x.User).WithMany()
+                .HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+
+            // Cùng lý do với content_revisions: không có khoá ngoại tới bản ghi cha vì một bảng
+            // dùng chung cho bốn loại. Hàng mồ côi vô hại — nó hết hạn rồi bị dọn.
+            e.HasIndex(x => x.ExpiresAt).HasDatabaseName("ix_edit_claims_expires_at");
         });
 
         // ---------- Module Tickets (Architecture v3.1) ----------
@@ -402,6 +512,13 @@ public partial class AppDbContext : DbContext
     // Tách hằng regex ra ngoài để phần escape của PostgreSQL không lẫn với chuỗi C#.
     private const string PermissionCodePattern =
         @"code ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$'";
+
+    /// <summary>
+    /// Dấu vết sửa đổi đi theo cặp: có mốc thời gian thì phải có chữ ký, và ngược lại. Một
+    /// bản ghi "đã sửa lúc 3 giờ sáng, không rõ ai" còn tệ hơn là không ghi gì.
+    /// </summary>
+    private const string LastEditPairing =
+        "(last_edited_at is null) = (last_edited_by is null)";
 
     private const string EmailPattern =
         @"'^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'";

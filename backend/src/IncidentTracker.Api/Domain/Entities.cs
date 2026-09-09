@@ -220,7 +220,7 @@ public enum FeedbackStatus
 }
 
 /// <summary>ENT-Incident — aggregate root của module Incident Management.</summary>
-public class Incident
+public class Incident : Modules.Revisions.IEditableContent
 {
     public Guid Id { get; set; }
     public string Title { get; set; } = null!;
@@ -250,6 +250,29 @@ public class Incident
     public User? Resolver { get; set; }
     public bool IsDeleted { get; set; }
 
+
+    /// <summary>
+    /// Lần sửa nội dung gần nhất — <c>null</c> nghĩa là chưa ai sửa.
+    ///
+    /// Trùng lặp có chủ ý với dòng mới nhất trong <see cref="ContentRevision"/>: nhãn "đã sửa"
+    /// phải hiện trên **mọi** hàng của danh sách, và tính lại bằng một truy vấn gộp cho mỗi
+    /// trang là đổi một nhãn nhỏ lấy một phép join không cần thiết.
+    /// </summary>
+    public DateTimeOffset? LastEditedAt { get; set; }
+
+    public Guid? LastEditedBy { get; set; }
+    public User? LastEditor { get; set; }
+
+    /// <summary>
+    /// Tăng đúng một lần cho mỗi lần **nội dung** đổi, và chỉ ở một chỗ duy nhất
+    /// (<c>EditDraft.Record</c>). Đây là giá trị phía sau <c>ETag</c>/<c>If-Match</c>.
+    ///
+    /// Cố ý KHÔNG nhúc nhích khi đổi trạng thái, người xử lý hay liên kết: nó trả lời đúng một
+    /// câu hỏi — "form sửa mà tôi đang mở còn khớp với bản ghi không" — và những thao tác kia
+    /// không hề đụng vào các ô trong form đó. Bắt chúng bump phiên bản chỉ tạo ra 412 giả.
+    /// </summary>
+    public int Version { get; set; }
+
     public List<IncidentStatusHistory> StatusHistory { get; set; } = new();
     public List<Feedback> Feedbacks { get; set; } = new();
     public List<IncidentComment> Comments { get; set; } = new();
@@ -260,7 +283,7 @@ public class Incident
 /// <see cref="IncidentStatusHistory"/> vốn là bằng chứng vòng đời, comment là hội thoại:
 /// khách hàng bổ sung thông tin, kỹ thuật viên hỏi lại, và lời giải thích khi đóng sự cố.
 /// </summary>
-public class IncidentComment
+public class IncidentComment : Modules.Revisions.IEditableContent
 {
     public Guid Id { get; set; }
     public Guid IncidentId { get; set; }
@@ -269,6 +292,28 @@ public class IncidentComment
     public User Author { get; set; } = null!;
     public string Body { get; set; } = null!;
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>
+    /// Lần sửa nội dung gần nhất — <c>null</c> nghĩa là chưa ai sửa.
+    ///
+    /// Trùng lặp có chủ ý với dòng mới nhất trong <see cref="ContentRevision"/>: nhãn "đã sửa"
+    /// phải hiện trên **mọi** hàng của danh sách, và tính lại bằng một truy vấn gộp cho mỗi
+    /// trang là đổi một nhãn nhỏ lấy một phép join không cần thiết.
+    /// </summary>
+    public DateTimeOffset? LastEditedAt { get; set; }
+
+    public Guid? LastEditedBy { get; set; }
+    public User? LastEditor { get; set; }
+
+    /// <summary>
+    /// Tăng đúng một lần cho mỗi lần **nội dung** đổi, và chỉ ở một chỗ duy nhất
+    /// (<c>EditDraft.Record</c>). Đây là giá trị phía sau <c>ETag</c>/<c>If-Match</c>.
+    ///
+    /// Cố ý KHÔNG nhúc nhích khi đổi trạng thái, người xử lý hay liên kết: nó trả lời đúng một
+    /// câu hỏi — "form sửa mà tôi đang mở còn khớp với bản ghi không" — và những thao tác kia
+    /// không hề đụng vào các ô trong form đó. Bắt chúng bump phiên bản chỉ tạo ra 412 giả.
+    /// </summary>
+    public int Version { get; set; }
 }
 
 /// <summary>ENT-IncidentStatusHistory — bản ghi bất biến, chỉ append (BR-BIZ-06).</summary>
@@ -286,7 +331,7 @@ public class IncidentStatusHistory
 }
 
 /// <summary>ENT-Feedback — phản hồi khách hàng do Support ghi nhận.</summary>
-public class Feedback
+public class Feedback : Modules.Revisions.IEditableContent
 {
     public Guid Id { get; set; }
     public FeedbackChannel Channel { get; set; }
@@ -303,6 +348,28 @@ public class Feedback
     public User CreatedByUser { get; set; } = null!;
     public DateTimeOffset CreatedAt { get; set; }
 
+    /// <summary>
+    /// Lần sửa nội dung gần nhất — <c>null</c> nghĩa là chưa ai sửa.
+    ///
+    /// Trùng lặp có chủ ý với dòng mới nhất trong <see cref="ContentRevision"/>: nhãn "đã sửa"
+    /// phải hiện trên **mọi** hàng của danh sách, và tính lại bằng một truy vấn gộp cho mỗi
+    /// trang là đổi một nhãn nhỏ lấy một phép join không cần thiết.
+    /// </summary>
+    public DateTimeOffset? LastEditedAt { get; set; }
+
+    public Guid? LastEditedBy { get; set; }
+    public User? LastEditor { get; set; }
+
+    /// <summary>
+    /// Tăng đúng một lần cho mỗi lần **nội dung** đổi, và chỉ ở một chỗ duy nhất
+    /// (<c>EditDraft.Record</c>). Đây là giá trị phía sau <c>ETag</c>/<c>If-Match</c>.
+    ///
+    /// Cố ý KHÔNG nhúc nhích khi đổi trạng thái, người xử lý hay liên kết: nó trả lời đúng một
+    /// câu hỏi — "form sửa mà tôi đang mở còn khớp với bản ghi không" — và những thao tác kia
+    /// không hề đụng vào các ô trong form đó. Bắt chúng bump phiên bản chỉ tạo ra 412 giả.
+    /// </summary>
+    public int Version { get; set; }
+
     public List<FeedbackReply> Replies { get; set; } = new();
 }
 
@@ -311,7 +378,7 @@ public class Feedback
 /// trên một Feedback. Đây là nửa còn thiếu của vòng khép kín: khách hàng gửi, doanh nghiệp
 /// trả lời, khách hàng đọc được câu trả lời ngay trên phản hồi của mình.
 /// </summary>
-public class FeedbackReply
+public class FeedbackReply : Modules.Revisions.IEditableContent
 {
     public Guid Id { get; set; }
     public Guid FeedbackId { get; set; }
@@ -324,4 +391,128 @@ public class FeedbackReply
     public string Body { get; set; } = null!;
     public bool IsAutomatic { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>
+    /// Lần sửa nội dung gần nhất — <c>null</c> nghĩa là chưa ai sửa.
+    ///
+    /// Trùng lặp có chủ ý với dòng mới nhất trong <see cref="ContentRevision"/>: nhãn "đã sửa"
+    /// phải hiện trên **mọi** hàng của danh sách, và tính lại bằng một truy vấn gộp cho mỗi
+    /// trang là đổi một nhãn nhỏ lấy một phép join không cần thiết.
+    /// </summary>
+    public DateTimeOffset? LastEditedAt { get; set; }
+
+    public Guid? LastEditedBy { get; set; }
+    public User? LastEditor { get; set; }
+
+    /// <summary>
+    /// Tăng đúng một lần cho mỗi lần **nội dung** đổi, và chỉ ở một chỗ duy nhất
+    /// (<c>EditDraft.Record</c>). Đây là giá trị phía sau <c>ETag</c>/<c>If-Match</c>.
+    ///
+    /// Cố ý KHÔNG nhúc nhích khi đổi trạng thái, người xử lý hay liên kết: nó trả lời đúng một
+    /// câu hỏi — "form sửa mà tôi đang mở còn khớp với bản ghi không" — và những thao tác kia
+    /// không hề đụng vào các ô trong form đó. Bắt chúng bump phiên bản chỉ tạo ra 412 giả.
+    /// </summary>
+    public int Version { get; set; }
+}
+
+/// <summary>
+/// Loại bản ghi mà một <see cref="ContentRevision"/> nói về.
+///
+/// Lưu dạng text trong DB (như mọi enum khác của dự án) để dump SQL tự giải thích và để
+/// check constraint đọc được bằng mắt.
+/// </summary>
+public enum EditableEntityType
+{
+    Incident = 0,
+    IncidentComment = 1,
+    Feedback = 2,
+    FeedbackReply = 3
+}
+
+/// <summary>
+/// ENT-ContentRevision — <b>một dòng cho một lần đổi một trường</b>, chỉ append.
+///
+/// Đây là cái giá phải trả để nội dung sửa được mà vẫn giữ được bằng chứng: bản ghi hiện tại
+/// nói "đang là gì", bảng này nói "đã từng là gì, ai đổi, lúc nào". Không có endpoint nào sửa
+/// hay xóa được hàng ở đây — cùng nguyên tắc với <see cref="IncidentStatusHistory"/>.
+///
+/// <b>Một bảng chung cho bốn thực thể</b> chứ không phải bốn bảng riêng: câu hỏi ("trường này
+/// đã từng là gì") và câu trả lời (giá trị cũ, giá trị mới, chữ ký) giống hệt nhau ở cả bốn
+/// chỗ, nên bốn bảng chỉ là cùng một lược đồ chép ra bốn lần. Đổi lại là không có khóa ngoại
+/// tới bản ghi cha — chấp nhận được vì lịch sử **phải** sống sót qua việc bản ghi cha bị xóa,
+/// đúng như lịch sử trạng thái đã cố ý không gắn query filter.
+///
+/// Mọi lần sửa đều ghi, kể cả khi chính chủ sửa bài của mình: chữ ký không phải hình phạt
+/// dành cho người kiểm duyệt, nó là dấu vết của mọi thay đổi.
+/// </summary>
+public class ContentRevision
+{
+    public Guid Id { get; set; }
+
+    public EditableEntityType EntityType { get; set; }
+
+    /// <summary>Id của bản ghi bị sửa. Cố ý không có khóa ngoại — xem chú thích của lớp.</summary>
+    public Guid EntityId { get; set; }
+
+    /// <summary>Tên trường nghiệp vụ, viết snake_case như cột: <c>title</c>, <c>body</c>…</summary>
+    public string Field { get; set; } = null!;
+
+    public string? OldValue { get; set; }
+    public string? NewValue { get; set; }
+
+    /// <summary>Chữ ký — người **thực sự** bấm nút, không phải người sở hữu bản ghi.</summary>
+    public Guid EditedBy { get; set; }
+    public User EditedByUser { get; set; } = null!;
+
+    public DateTimeOffset EditedAt { get; set; }
+
+    /// <summary>
+    /// Người sửa không phải chủ bản ghi — tức đây là một lần kiểm duyệt, không phải tác giả
+    /// tự sửa bài mình.
+    ///
+    /// Lưu thành cột chứ không suy ra lúc đọc: chủ sở hữu của bản ghi có thể đổi (sự cố được
+    /// chuyển cho người khác), và khi đó việc suy lại sẽ kể sai câu chuyện của quá khứ.
+    /// </summary>
+    public bool OnBehalf { get; set; }
+
+    /// <summary>Lý do sửa — tùy chọn với tác giả, nhưng là thứ nên có khi kiểm duyệt.</summary>
+    public string? Reason { get; set; }
+}
+
+/// <summary>
+/// ENT-EditClaim — <b>"tôi đang mở form sửa bản ghi này"</b>.
+///
+/// Không phải một cái khoá: nó không chặn ai cả. Nó chỉ trả lời câu hỏi "bản ghi này có đang bị
+/// ai chiếm dụng để sửa không", và khi câu trả lời là có, tầng API siết điều kiện ghi — lần
+/// <c>PATCH</c> kế tiếp buộc phải mang <c>If-Match</c> đúng phiên bản.
+///
+/// <b>Vì sao không khoá cứng.</b> Khoá cứng thì một tab quên đóng là bản ghi chết cứng cho tới
+/// khi hết hạn, và luôn phải kèm một nút "phá khoá" mà rốt cuộc ai cũng bấm. Siết điều kiện ghi
+/// giữ được điều thật sự quan trọng — không ai ghi đè lên bản mình chưa nhìn thấy — mà không
+/// dựng thêm một cánh cửa phải có chìa.
+///
+/// <b>Nhiều người cùng giữ chỗ là hợp lệ.</b> Khoá chính gồm cả <see cref="UserId"/>, nên hai
+/// người cùng mở form thì có hai hàng, và <b>cả hai</b> đều thấy phía kia đang chiếm dụng nên
+/// cả hai đều phải gửi <c>If-Match</c>. Một hàng duy nhất cho mỗi bản ghi sẽ chỉ siết người
+/// đến sau, trong khi người đến trước mới là người ngồi lâu nhất trên một form cũ.
+/// </summary>
+public class EditClaim
+{
+    public EditableEntityType EntityType { get; set; }
+    public Guid EntityId { get; set; }
+
+    public Guid UserId { get; set; }
+    public User User { get; set; } = null!;
+
+    public DateTimeOffset ClaimedAt { get; set; }
+
+    /// <summary>
+    /// Hết hạn thì hàng này coi như không tồn tại — không có tiến trình nào phải chạy đúng giờ
+    /// để nó ngừng có hiệu lực.
+    ///
+    /// Người dùng đóng máy giữa chừng là chuyện thường, và một dấu vết "đang sửa" sống mãi sẽ
+    /// bắt mọi người sau đó gửi <c>If-Match</c> vì một cái tab đã tắt từ hôm qua. Hàng cũ được
+    /// dọn nhân tiện mỗi lần có ai đụng tới cùng bản ghi.
+    /// </summary>
+    public DateTimeOffset ExpiresAt { get; set; }
 }
