@@ -124,6 +124,54 @@ public static class ResourceAccessRules
         var uid = user.GetUserId();
         return f => f.CreatedBy == uid;
     }
+
+    // ---------------- Sửa nội dung ----------------
+    //
+    // Bốn quy tắc dưới đây cùng một hình dạng, và đó là hình dạng module Ticket đã dùng từ
+    // đầu (`TicketAccess.CanEditContent`): **tác giả, hoặc người có quyền cấp cao của chính
+    // module đó**. Giữ nguyên hình dạng ấy thay vì nghĩ ra một luật thứ hai cho Incident và
+    // Feedback — hai luật cho cùng một câu hỏi là cách chắc chắn để chúng lệch nhau.
+    //
+    // Cái thay đổi so với trước không nằm ở ai được sửa, mà ở chỗ **mọi** lần sửa đều để lại
+    // một dòng trong `content_revisions` kèm chữ ký người bấm nút — kể cả tác giả sửa bài của
+    // chính mình. Quyền trả lời câu hỏi "ai được sửa"; lịch sử trả lời câu hỏi "đã sửa gì" —
+    // và câu thứ hai không có ngoại lệ nào.
+
+    /// <summary>
+    /// Sửa tiêu đề, mô tả, mức độ của một sự cố: người báo cáo, hoặc người có
+    /// <c>incident.manage_any</c> (manager, admin, system).
+    ///
+    /// Cố ý KHÔNG dùng người được giao xử lý làm điều kiện: nhận việc là nhận trách nhiệm
+    /// **xử lý**, không phải quyền viết lại lời tường thuật của người báo. Người được giao
+    /// muốn bổ sung thì đã có hội thoại — nơi mỗi lời nói đứng tên người nói.
+    /// </summary>
+    public static bool CanEditIncidentContent(ClaimsPrincipal user, Guid reporterId)
+        => reporterId == user.GetUserId() || user.HasPermission(Permissions.IncidentManageAny);
+
+    /// <summary>Sửa một bình luận trên sự cố: tác giả bình luận, hoặc <c>incident.manage_any</c>.</summary>
+    public static bool CanEditIncidentComment(ClaimsPrincipal user, Guid authorId)
+        => authorId == user.GetUserId() || user.HasPermission(Permissions.IncidentManageAny);
+
+    /// <summary>
+    /// Sửa một phản hồi: người đã gửi nó, hoặc người có <c>feedback.respond</c>.
+    ///
+    /// <c>feedback.respond</c> chứ không phải <c>feedback.read.all</c>: quyền đọc-tất-cả là
+    /// quyền **xem**, và kỹ thuật viên có nó chỉ để tra cứu bối cảnh. Sửa lời của khách hàng
+    /// là việc của người đang đứng ra tiếp khách — đúng những vai trò mang quyền trả lời.
+    /// </summary>
+    public static bool CanEditFeedback(ClaimsPrincipal user, Guid createdBy)
+        => createdBy == user.GetUserId() || user.HasPermission(Permissions.FeedbackRespond);
+
+    /// <summary>
+    /// Sửa một câu trả lời: người đã viết nó, hoặc người có <c>feedback.respond</c>.
+    ///
+    /// Lời xác nhận tự động (<paramref name="isAutomatic"/>) thì không ai sửa được. Nó không
+    /// có tác giả để mà đứng tên, và nó là bản sao của đúng câu hệ thống đã gửi cho khách —
+    /// sửa nó là sửa lại quá khứ chứ không phải sửa một câu chữ.
+    /// </summary>
+    public static bool CanEditFeedbackReply(ClaimsPrincipal user, Guid? responderId, bool isAutomatic)
+        => !isAutomatic
+           && (responderId == user.GetUserId() || user.HasPermission(Permissions.FeedbackRespond));
 }
 
 /// <summary>
