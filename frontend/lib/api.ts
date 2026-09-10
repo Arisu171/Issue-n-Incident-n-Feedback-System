@@ -47,6 +47,48 @@ export interface UserRef {
   email: string;
 }
 
+/** Chữ ký của lần sửa gần nhất. Có mặt nghĩa là bản ghi không còn nguyên bản. */
+export interface EditSignature {
+  by: UserRef;
+  at: string;
+}
+
+/**
+ * Một dòng lịch sử sửa đổi: một trường, một lần đổi, một chữ ký.
+ *
+ * `onBehalf` phân biệt "chính chủ sửa bài mình" với "người khác sửa hộ" — giao diện bày hai
+ * việc đó khác nhau vì người đọc cần biết ngay lời hiện tại còn là lời của tác giả hay không.
+ */
+export interface Revision {
+  id: string;
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
+  editedBy: UserRef;
+  editedAt: string;
+  onBehalf: boolean;
+  reason: string | null;
+}
+
+/** Một người đang mở form sửa cùng bản ghi. */
+export interface ActiveEditor {
+  user: UserRef;
+  since: string;
+  expiresAt: string;
+}
+
+/**
+ * Kết quả của một lần giữ chỗ sửa.
+ *
+ * `others` rỗng nghĩa là chỉ mình bạn đang mở form. Khác rỗng nghĩa là **cả hai phía** đều phải
+ * gửi `If-Match` khi lưu — backend siết điều kiện ghi đúng lúc có tranh chấp.
+ */
+export interface EditClaim {
+  expiresAt: string;
+  version: number;
+  others: ActiveEditor[];
+}
+
 export interface SlaStatus {
   breached: boolean;
   thresholdHours: number | null;
@@ -70,6 +112,10 @@ export interface Incident {
   isDeleted: boolean;
   /** null khi sự cố đã đóng — lúc đó đồng hồ SLA đã dừng. */
   sla: SlaStatus | null;
+  /** null khi nội dung còn nguyên bản. Lịch sử đầy đủ ở `incidentRevisions`. */
+  lastEdit: EditSignature | null;
+  /** Phiên bản nội dung — gửi lại trong `If-Match` khi lưu. */
+  version: number;
 }
 
 export interface StatusHistoryEntry {
@@ -93,6 +139,8 @@ export interface Feedback {
   createdBy: string;
   createdByName: string;
   createdAt: string;
+  lastEdit: EditSignature | null;
+  version: number;
 }
 
 /** Một câu trả lời trong luồng hội thoại của phản hồi. `responder` null khi là lời xác nhận tự động. */
@@ -103,6 +151,9 @@ export interface FeedbackReply {
   isAutomatic: boolean;
   body: string;
   createdAt: string;
+  /** Luôn null với lời xác nhận tự động — không ai sửa được nó. */
+  lastEdit: EditSignature | null;
+  version: number;
 }
 
 /** Một bình luận trong luồng trao đổi của sự cố (UC-BIZ-09). */
@@ -112,6 +163,8 @@ export interface IncidentComment {
   author: UserRef;
   body: string;
   createdAt: string;
+  lastEdit: EditSignature | null;
+  version: number;
 }
 
 export interface AppUser {
@@ -298,6 +351,17 @@ export const session = {
     return session.user()?.permissions.includes(permission) ?? false;
   },
 };
+
+/**
+ * Header `If-Match` cho một lần ghi có điều kiện.
+ *
+ * Luôn gửi khi biết phiên bản, không chỉ lúc bản ghi đang bị chiếm dụng: backend chỉ **bắt
+ * buộc** header này lúc có tranh chấp, nhưng gửi sẵn thì một form mở từ lâu không bao giờ ghi
+ * đè lặng lẽ lên thay đổi của người khác — nó nhận 412 và người dùng được tải lại.
+ */
+function ifMatch(version?: number): Record<string, string> | undefined {
+  return version === undefined ? undefined : { 'If-Match': `"v${version}"` };
+}
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = session.token();
@@ -528,6 +592,47 @@ export const api = {
   createIncident: (project: string, body: { title: string; description?: string; severity: IncidentSeverity }) =>
     request<Incident>(`/api/projects/${project}/incidents`, { method: 'POST', body: JSON.stringify(body) }),
 
+  /**
+   * Sửa nội dung sự cố. Trường nào không gửi thì giữ nguyên; `description: ''` là xóa mô tả.
+   *
+   * Cố ý không nhận `status`: vòng đời đi qua `updateStatus` với state machine một chiều của nó.
+   */
+  updateIncident: (project: string, id: string, body: Partial<{
+    title: string;
+    description: string;
+    severity: IncidentSeverity;
+    reason: string;
+  }>, version?: number) => request<Incident>(`/api/projects/${project}/incidents/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+    headers: ifMatch(version),
+  }),
+
+  incidentRevisions: (project: string, id: string) =>
+    request<Revision[]>(`/api/projects/${project}/incidents/${id}/revisions`),
+
+  claimIncidentEdit: (project: string, id: string) =>
+    request<EditClaim>(`/api/projects/${project}/incidents/${id}/edit-claim`, { method: 'PUT' }),
+
+  releaseIncidentEdit: (project: string, id: string) =>
+    request<null>(`/api/projects/${project}/incidents/${id}/edit-claim`, { method: 'DELETE' }),
+
+  updateComment: (project: string, id: string, commentId: string, body: string, reason?: string, version?: number) =>
+    request<IncidentComment>(`/api/projects/${project}/incidents/${id}/comments/${commentId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ body, reason }),
+      headers: ifMatch(version),
+    }),
+
+  commentRevisions: (project: string, id: string, commentId: string) =>
+    request<Revision[]>(`/api/projects/${project}/incidents/${id}/comments/${commentId}/revisions`),
+
+  claimCommentEdit: (project: string, id: string, commentId: string) =>
+    request<EditClaim>(`/api/projects/${project}/incidents/${id}/comments/${commentId}/edit-claim`, { method: 'PUT' }),
+
+  releaseCommentEdit: (project: string, id: string, commentId: string) =>
+    request<null>(`/api/projects/${project}/incidents/${id}/comments/${commentId}/edit-claim`, { method: 'DELETE' }),
+
   updateStatus: (project: string, id: string, targetStatus: IncidentStatus, note?: string) =>
     request<Incident>(`/api/projects/${project}/incidents/${id}/status`, {
       method: 'PATCH',
@@ -594,6 +699,43 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ body }),
     }),
+
+  /** Sửa nội dung phản hồi. `customerEmail: ''` xóa email liên hệ; trường bỏ trống thì giữ nguyên. */
+  updateFeedback: (project: string, id: string, body: Partial<{
+    channel: FeedbackChannel;
+    customerEmail: string;
+    content: string;
+    reason: string;
+  }>, version?: number) => request<Feedback>(`/api/projects/${project}/feedbacks/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+    headers: ifMatch(version),
+  }),
+
+  feedbackRevisions: (project: string, id: string) =>
+    request<Revision[]>(`/api/projects/${project}/feedbacks/${id}/revisions`),
+
+  claimFeedbackEdit: (project: string, id: string) =>
+    request<EditClaim>(`/api/projects/${project}/feedbacks/${id}/edit-claim`, { method: 'PUT' }),
+
+  releaseFeedbackEdit: (project: string, id: string) =>
+    request<null>(`/api/projects/${project}/feedbacks/${id}/edit-claim`, { method: 'DELETE' }),
+
+  updateReply: (project: string, id: string, replyId: string, body: string, reason?: string, version?: number) =>
+    request<FeedbackReply>(`/api/projects/${project}/feedbacks/${id}/replies/${replyId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ body, reason }),
+      headers: ifMatch(version),
+    }),
+
+  replyRevisions: (project: string, id: string, replyId: string) =>
+    request<Revision[]>(`/api/projects/${project}/feedbacks/${id}/replies/${replyId}/revisions`),
+
+  claimReplyEdit: (project: string, id: string, replyId: string) =>
+    request<EditClaim>(`/api/projects/${project}/feedbacks/${id}/replies/${replyId}/edit-claim`, { method: 'PUT' }),
+
+  releaseReplyEdit: (project: string, id: string, replyId: string) =>
+    request<null>(`/api/projects/${project}/feedbacks/${id}/replies/${replyId}/edit-claim`, { method: 'DELETE' }),
 
   listUsers: (params: { search?: string; isActive?: boolean; page?: number; pageSize?: number }) =>
     request<Paged<AppUser>>(`/api/users${query(params)}`),
