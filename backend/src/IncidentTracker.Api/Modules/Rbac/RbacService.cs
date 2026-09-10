@@ -301,6 +301,14 @@ public sealed class RbacService
             blockers.Add("đã trả lời phản hồi");
         }
 
+        // Chữ ký trong lịch sử sửa đổi cũng là dữ liệu nghiệp vụ, và khóa ngoại của nó là
+        // Restrict. Thiếu dòng này thì xóa một tài khoản từng sửa bài sẽ vỡ ở tầng DB — 500
+        // kèm thông báo của Postgres thay vì 409 kèm lý do đọc được.
+        if (await _db.ContentRevisions.AnyAsync(r => r.EditedBy == id, ct))
+        {
+            blockers.Add("đã sửa nội dung sự cố hoặc phản hồi");
+        }
+
         if (blockers.Count > 0)
         {
             throw AppException.Conflict(
