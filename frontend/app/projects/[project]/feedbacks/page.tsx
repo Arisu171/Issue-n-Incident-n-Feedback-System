@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import {
   api,
+  ApiError,
   CHANNEL_LABEL,
   formatTime,
   session,
@@ -19,6 +20,9 @@ import { ActionFeedback, ErrorBox, FeedbackStatusBadge, Guard, PageHead, Pager, 
 import { UNCATEGORIZED, useTransferTargets, type TransferTarget } from '@/components/tickets/ProjectTransfer';
 import { Icons } from '@/components/tickets/Bits';
 import { QueryInput } from '@/components/QueryInput';
+import { EditTrail } from '@/components/EditTrail';
+import { ActiveEditorsNotice } from '@/components/ActiveEditorsNotice';
+import { useEditClaim } from '@/lib/useEditClaim';
 import { tr } from '@/lib/i18n';
 
 /**
@@ -38,8 +42,41 @@ function ReplyThread({
 }) {
   const [replies, setReplies] = useState<FeedbackReply[] | null>(null);
   const [body, setBody] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
   const load = useAction<FeedbackReply[]>({ latest: true });
   const replyAction = useAction<FeedbackReply>();
+  const editAction = useAction<FeedbackReply>();
+
+  // Trùng ResourceAccessRules.CanEditFeedbackReply ở backend: người đã viết câu trả lời, hoặc
+  // người có feedback.respond. Lời xác nhận tự động thì không ai sửa được.
+  const me = session.user()?.id;
+
+  const editors = useEditClaim(
+    editingId !== null, editingId ?? '',
+    () => api.claimReplyEdit(project, feedbackId, editingId!),
+    () => api.releaseReplyEdit(project, feedbackId, editingId!),
+  );
+
+  async function saveEdit(replyId: string, version: number) {
+    const updated = await editAction.run(
+      async () => {
+        try {
+          return await api.updateReply(project, feedbackId, replyId, draft.trim(), undefined, version);
+        } catch (e) {
+          // 412: người khác vừa sửa câu trả lời này. Tải lại luồng để người dùng thấy bản mới
+          // trước khi gõ lại, thay vì để họ bấm Lưu thêm vài lần nữa vào hư không.
+          if (e instanceof ApiError && e.status === 412) await runLoad();
+          throw e;
+        }
+      },
+      tr('Đã cập nhật câu trả lời.'),
+    );
+    if (updated) {
+      setReplies((prev) => (prev ?? []).map((r) => (r.id === replyId ? updated : r)));
+      setEditingId(null);
+    }
+  }
 
   const runLoad = useCallback(async () => {
     const result = await load.run(() => api.listReplies(project, feedbackId));
@@ -82,8 +119,59 @@ function ReplyThread({
                 <strong>{r.isAutomatic ? tr('Hệ thống') : (r.responder?.displayName ?? '—')}</strong>{' '}
                 {r.isAutomatic && <span className="badge fb-Acknowledged">{tr('tự động')}</span>}{' '}
                 <span className="muted">· {formatTime(r.createdAt)}</span>
+                <EditTrail
+                  lastEdit={r.lastEdit}
+                  loadRevisions={() => api.replyRevisions(project, feedbackId, r.id)}
+                />
+                {!r.isAutomatic && (r.responder?.id === me || canRespond) && editingId !== r.id && (
+                  <>
+                    {' '}
+                    <button
+                      type="button"
+                      className="ghost small"
+                      onClick={() => {
+                        setEditingId(r.id);
+                        setDraft(r.body);
+                      }}
+                    >
+                      {tr('Sửa')}
+                    </button>
+                  </>
+                )}
               </div>
-              <div>{r.body}</div>
+              {editingId === r.id ? (
+                <div>
+                  <ActiveEditorsNotice editors={editors} />
+                  <ActionFeedback action={editAction} processingLabel={tr('Đang lưu câu trả lời…')} />
+                  <div className="field">
+                    <label htmlFor={`edit-reply-${r.id}`}>{tr('Nội dung')}<RequiredMark /></label>
+                    <textarea
+                      id={`edit-reply-${r.id}`}
+                      required
+                      maxLength={2000}
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                    />
+                  </div>
+                  <div className="editor-actions">
+                    <button type="button" className="btn btn-secondary" onClick={() => setEditingId(null)}>
+                      {tr('Hủy')}
+                    </button>
+                    <SubmitButton
+                      action={editAction}
+                      type="button"
+                      disabled={!draft.trim()}
+                      processingLabel={tr('Đang lưu…')}
+                      className="btn btn-primary"
+                      onClick={() => saveEdit(r.id, r.version)}
+                    >
+                      {tr('Lưu')}
+                    </SubmitButton>
+                  </div>
+                </div>
+              ) : (
+                <div>{r.body}</div>
+              )}
             </li>
           ))}
         </ul>
@@ -390,6 +478,19 @@ function FeedbackQueue() {
                       onLink={link}
                       onUnlink={unlink}
                       onReplied={runLoad}
+                      onStale={runLoad}
+                      onEdited={(updated) =>
+                        // Thay đúng một hàng thay vì tải lại cả trang: tải lại sẽ đóng luồng
+                        // trao đổi đang mở và kéo người dùng về đầu bảng.
+                        setData((current) =>
+                          current
+                            ? {
+                                ...current,
+                                items: current.items.map((f) => (f.id === updated.id ? updated : f)),
+                              }
+                            : current,
+                        )
+                      }
                     />
                   ))}
                 </tbody>
@@ -425,6 +526,8 @@ function FeedbackRows({
   onUnlink,
   onTransfer,
   onReplied,
+  onEdited,
+  onStale,
 }: {
   project: string;
   feedback: Feedback;
@@ -442,15 +545,128 @@ function FeedbackRows({
   onUnlink: (feedbackId: string) => void;
   onTransfer: (feedbackId: string, toProject: string) => void;
   onReplied: () => void;
+  onEdited: (updated: Feedback) => void;
+  /** 412 — hàng trên màn hình đã cũ, kéo lại cả trang để người dùng đối chiếu bản mới. */
+  onStale: () => void;
 }) {
+  const [editingContent, setEditingContent] = useState(false);
+  const [contentDraft, setContentDraft] = useState('');
+  const [reasonDraft, setReasonDraft] = useState('');
+  const editAction = useAction<Feedback>();
+
+  const editors = useEditClaim(
+    editingContent, feedback.id,
+    () => api.claimFeedbackEdit(project, feedback.id),
+    () => api.releaseFeedbackEdit(project, feedback.id),
+  );
+
+  async function saveContent() {
+    const body: Parameters<typeof api.updateFeedback>[2] = { content: contentDraft.trim() };
+    if (reasonDraft.trim()) body.reason = reasonDraft.trim();
+
+    const updated = await editAction.run(
+      async () => {
+        try {
+          return await api.updateFeedback(project, feedback.id, body, feedback.version);
+        } catch (e) {
+          // 412: hàng trên màn hình đã cũ. Kéo cả trang về bản mới nhất để người dùng đối
+          // chiếu rồi sửa lại, thay vì để họ gõ lại đúng thứ vừa bị từ chối.
+          if (e instanceof ApiError && e.status === 412) onStale();
+          throw e;
+        }
+      },
+      tr('Đã cập nhật nội dung phản hồi.'),
+    );
+
+    if (updated) {
+      onEdited(updated);
+      setEditingContent(false);
+    }
+  }
+
   const changeable = openIncidents.filter((incident) => incident.id !== feedback.incidentId);
   const projectLabel = project === UNCATEGORIZED ? tr('chưa phân loại') : project;
+
+  // Trùng ResourceAccessRules.CanEditFeedback ở backend: người đã gửi phản hồi, hoặc người có
+  // feedback.respond. Kỹ thuật viên chỉ có quyền đọc-tất-cả thì không sửa được lời của khách.
+  const me = session.user()?.id;
+  const canEdit = feedback.createdBy === me || canRespond;
 
   return (
     <>
       <tr>
         <td>{tr(CHANNEL_LABEL[feedback.channel])}</td>
-        <td style={{ maxWidth: 380 }}>{feedback.content}</td>
+        <td style={{ maxWidth: 380 }}>
+          {editingContent ? (
+            <div>
+              <ActiveEditorsNotice editors={editors} />
+              <ActionFeedback action={editAction} processingLabel={tr('Đang lưu phản hồi…')} />
+              <div className="field">
+                <label htmlFor={`edit-feedback-${feedback.id}`}>{tr('Nội dung')}<RequiredMark /></label>
+                <textarea
+                  id={`edit-feedback-${feedback.id}`}
+                  required
+                  minLength={10}
+                  maxLength={10000}
+                  value={contentDraft}
+                  onChange={(e) => setContentDraft(e.target.value)}
+                />
+              </div>
+              {/* Lý do chỉ hỏi khi sửa lời của người khác — xem chú thích cùng chuyện ở màn
+                  hình chi tiết sự cố. */}
+              {feedback.createdBy !== me && (
+                <div className="field">
+                  <label htmlFor={`edit-feedback-reason-${feedback.id}`}>{tr('Lý do sửa')}</label>
+                  <input
+                    id={`edit-feedback-reason-${feedback.id}`}
+                    maxLength={500}
+                    value={reasonDraft}
+                    onChange={(e) => setReasonDraft(e.target.value)}
+                  />
+                </div>
+              )}
+              <div className="editor-actions">
+                <button type="button" className="btn btn-secondary" onClick={() => setEditingContent(false)}>
+                  {tr('Hủy')}
+                </button>
+                <SubmitButton
+                  action={editAction}
+                  type="button"
+                  disabled={contentDraft.trim().length < 10}
+                  processingLabel={tr('Đang lưu…')}
+                  className="btn btn-primary"
+                  onClick={saveContent}
+                >
+                  {tr('Lưu')}
+                </SubmitButton>
+              </div>
+            </div>
+          ) : (
+            <>
+              {feedback.content}
+              <EditTrail
+                lastEdit={feedback.lastEdit}
+                loadRevisions={() => api.feedbackRevisions(project, feedback.id)}
+              />
+              {canEdit && (
+                <>
+                  {' '}
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={() => {
+                      setContentDraft(feedback.content);
+                      setReasonDraft('');
+                      setEditingContent(true);
+                    }}
+                  >
+                    {tr('Sửa')}
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        </td>
         <td>
           <FeedbackStatusBadge status={feedback.status} />
         </td>

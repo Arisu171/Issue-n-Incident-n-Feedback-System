@@ -2549,6 +2549,49 @@ details.delivery pre { max-height: 240px; overflow: auto; font-size: 12px; margi
   border: 2px solid var(--color-divider);
 }
 
+/* Lời nhắc trong luồng, không phải cảnh báo: nó không chặn thao tác nào nên không mượn màu
+   nhấn — viền trái đủ để mắt bắt được mà không kéo sự chú ý khỏi ô đang gõ. */
+.notice-inline {
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--color-divider);
+  background: color-mix(in srgb, var(--color-text) 4%, transparent);
+  font-size: 13px;
+}
+
+/* Lịch sử sửa đổi — mở ngay dưới chỗ nội dung bị sửa, thụt vào để không tranh chỗ với nó. */
+.edit-trail {
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-text) 3%, transparent);
+}
+
+/* Giá trị cũ gạch đi, giá trị mới xuống dòng ngay dưới: đọc từ trên xuống là thấy được lần
+   sửa đã đổi cái gì thành cái gì, không phải ghép hai cột bằng mắt. */
+.revision-diff { display: grid; gap: 2px; margin-top: 2px; }
+.revision-diff del,
+.revision-diff ins {
+  display: block;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Dùng đúng bộ token của bảng màu, không thêm đỏ/xanh mới: giao diện này vốn chỉ có một màu
+   nhấn, và một cặp màu lạ sẽ là hai màu duy nhất không theo chủ đề sáng/tối. */
+.revision-diff del {
+  background: var(--color-accent-100);
+  color: var(--color-accent-800);
+  text-decoration: line-through;
+}
+.revision-diff ins {
+  background: var(--color-neutral-100);
+  color: var(--color-neutral-800);
+  text-decoration: none;
+}
+
 dl.meta { display: grid; grid-template-columns: auto 1fr; gap: var(--space-2) var(--space-4); margin: 0; }
 dl.meta dt {
   font-size: 11px;

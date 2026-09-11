@@ -12,11 +12,15 @@ import {
   type Feedback,
   type Incident,
   type IncidentComment,
+  type IncidentSeverity,
   type StatusHistoryEntry,
 } from '@/lib/api';
 import { useAction } from '@/lib/useAction';
 import { ActionFeedback, ErrorBox, FeedbackStatusBadge, Guard, PageHead, RequiredMark, Select, SeverityBadge, SlaBadge, StatusBadge, SubmitButton } from '@/components/ui';
 import { UnassignedAvatar } from '@/components/tickets/Bits';
+import { EditTrail } from '@/components/EditTrail';
+import { ActiveEditorsNotice } from '@/components/ActiveEditorsNotice';
+import { useEditClaim } from '@/lib/useEditClaim';
 import { useTransferTargets } from '@/components/tickets/ProjectTransfer';
 import { tr } from '@/lib/i18n';
 
@@ -34,11 +38,20 @@ function IncidentDetail({ id }: { id: string }) {
   const [commentBody, setCommentBody] = useState('');
   const [assignee, setAssignee] = useState('');
 
+  // Bản nháp của form sửa nội dung. Khởi tạo từ bản ghi mỗi lần mở form chứ không đồng bộ
+  // liên tục: người đang gõ dở mà một lượt tải nền ập vào ghi đè là mất chữ.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ title: '', description: '', severity: 'Medium' as IncidentSeverity, reason: '' });
+  const [editingComment, setEditingComment] = useState<string | null>(null);
+  const [commentDraft, setCommentDraft] = useState('');
+
   // Mỗi thao tác có trạng thái riêng: đang chuyển trạng thái không được làm mờ nút gán người
   // xử lý, và thông báo của thao tác này không được đè lên thông báo của thao tác kia.
   const load = useAction<Incident>({ latest: true });
   const transitionAction = useAction<Incident>();
   const commentAction = useAction<IncidentComment>();
+  const editAction = useAction<Incident>();
+  const commentEditAction = useAction<IncidentComment>();
   const assignAction = useAction<void>();
   const transferAction = useAction<Incident>();
   const deleteAction = useAction<void>();
@@ -55,6 +68,26 @@ function IncidentDetail({ id }: { id: string }) {
   const canResolve = session.can('incident.resolve');
   const canReadFeedback = session.can('feedback.read');
   const canComment = session.can('incident.comment');
+
+  // Luật hiển thị phải trùng luật của backend (ResourceAccessRules.CanEditIncidentContent),
+  // nếu không thì nút hiện ra để rồi nhận 403 — hoặc tệ hơn, nút không hiện cho người thật
+  // sự có quyền. API vẫn là nơi phán quyết cuối cùng; đây chỉ là chuyện bày ra hay không.
+  const canManageAny = session.can('incident.manage_any');
+  const me = session.user()?.id;
+
+  // Chỗ sửa được giữ đúng trong lúc form mở, và trả lại khi đóng. Danh sách trả về là những
+  // người khác cũng đang mở form — hiện lên để người dùng biết trước khi gõ xong cả đoạn.
+  const incidentEditors = useEditClaim(
+    editing, id,
+    () => api.claimIncidentEdit(project, id),
+    () => api.releaseIncidentEdit(project, id),
+  );
+
+  const commentEditors = useEditClaim(
+    editingComment !== null, editingComment ?? '',
+    () => api.claimCommentEdit(project, id, editingComment!),
+    () => api.releaseCommentEdit(project, id, editingComment!),
+  );
 
   // Lượt tải chính chỉ gồm những gì đi cùng quyền incident.read — quyền mà Guard đã bảo đảm.
   const runLoad = useCallback(async () => {
@@ -164,6 +197,76 @@ function IncidentDetail({ id }: { id: string }) {
     }
   }
 
+  function openEdit() {
+    if (!incident) return;
+    setDraft({
+      title: incident.title,
+      description: incident.description ?? '',
+      severity: incident.severity,
+      reason: '',
+    });
+    setEditing(true);
+  }
+
+  async function saveEdit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!incident) return;
+
+    // Chỉ gửi trường thật sự đổi: gửi nguyên cả form thì backend vẫn bỏ qua giá trị trùng,
+    // nhưng payload sẽ mang cả những trường người dùng không hề chạm vào — và khi có tranh
+    // cãi, thứ đọc lại được phải đúng bằng thứ người ta đã sửa.
+    const body: Parameters<typeof api.updateIncident>[2] = {};
+    if (draft.title.trim() !== incident.title) body.title = draft.title.trim();
+    if (draft.description !== (incident.description ?? '')) body.description = draft.description;
+    if (draft.severity !== incident.severity) body.severity = draft.severity;
+
+    if (Object.keys(body).length === 0) {
+      setEditing(false);
+      return;
+    }
+
+    if (draft.reason.trim()) body.reason = draft.reason.trim();
+
+    // Luôn kèm phiên bản đang thấy trên màn hình. Backend chỉ **bắt buộc** If-Match khi bản ghi
+    // đang bị người khác chiếm dụng, nhưng gửi sẵn thì một form mở từ lâu không bao giờ ghi đè
+    // lặng lẽ — nó nhận 412 và người dùng được tải lại bản mới.
+    const updated = await editAction.run(
+      async () => {
+        try {
+          return await api.updateIncident(project, id, body, incident.version);
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 412) await runLoad();
+          throw e;
+        }
+      },
+      tr('Đã cập nhật nội dung sự cố.'),
+    );
+
+    if (updated) {
+      setIncident(updated);
+      setEditing(false);
+    }
+  }
+
+  async function saveComment(commentId: string, version: number) {
+    const updated = await commentEditAction.run(
+      async () => {
+        try {
+          return await api.updateComment(project, id, commentId, commentDraft.trim(), undefined, version);
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 412) await runLoad();
+          throw e;
+        }
+      },
+      tr('Đã cập nhật trao đổi.'),
+    );
+
+    if (updated) {
+      setComments((prev) => prev.map((c) => (c.id === commentId ? updated : c)));
+      setEditingComment(null);
+    }
+  }
+
   async function postComment(event: React.FormEvent) {
     event.preventDefault();
     const created = await commentAction.run(
@@ -197,6 +300,10 @@ function IncidentDetail({ id }: { id: string }) {
   }
 
   // Bước Resolved đòi thêm incident.resolve; nút bị vô hiệu hóa nhưng API mới là nơi quyết định.
+  // Trùng ResourceAccessRules.CanEditIncidentContent ở backend: người báo cáo, hoặc
+  // incident.manage_any. Người được giao xử lý cố ý KHÔNG có trong danh sách.
+  const canEditContent = incident.reporter.id === me || canManageAny;
+
   const nextNeedsResolve = incident.allowedNextStatus === 'Resolved';
   const canDoNext = nextNeedsResolve ? canResolve : canUpdateStatus;
 
@@ -229,7 +336,84 @@ function IncidentDetail({ id }: { id: string }) {
         {/* Cột trái gộp một khối chung, không nền — các phần ngăn nhau bằng nét kẻ. */}
         <div className="incident-main">
           <section className="incident-block">
-            <h5>{tr('Thông tin sự cố')}</h5>
+            <h5>
+              {tr('Thông tin sự cố')}
+              <EditTrail
+                lastEdit={incident.lastEdit}
+                loadRevisions={() => api.incidentRevisions(project, id)}
+              />
+              {canEditContent && !editing && !incident.isDeleted && (
+                <>
+                  {' '}
+                  <button type="button" className="ghost small" onClick={openEdit}>
+                    {tr('Sửa')}
+                  </button>
+                </>
+              )}
+            </h5>
+
+            {editing ? (
+              <form onSubmit={saveEdit}>
+                <ActiveEditorsNotice editors={incidentEditors} />
+                <ActionFeedback action={editAction} processingLabel={tr('Đang lưu nội dung…')} />
+                <div className="field">
+                  <label htmlFor="edit-title">{tr('Tiêu đề')}<RequiredMark /></label>
+                  <input
+                    id="edit-title"
+                    required
+                    minLength={5}
+                    maxLength={255}
+                    value={draft.title}
+                    onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="edit-description">{tr('Mô tả')}</label>
+                  <textarea
+                    id="edit-description"
+                    maxLength={10000}
+                    value={draft.description}
+                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="edit-severity">{tr('Mức độ')}</label>
+                  <Select
+                    id="edit-severity"
+                    value={draft.severity}
+                    onChange={(next) => setDraft({ ...draft, severity: next as IncidentSeverity })}
+                    options={[
+                      { value: 'Low', label: 'Low' },
+                      { value: 'Medium', label: 'Medium' },
+                      { value: 'High', label: 'High' },
+                      { value: 'Critical', label: 'Critical' },
+                    ]}
+                  />
+                </div>
+                {/* Lý do chỉ hỏi khi sửa bài người khác: bắt tác giả giải trình mỗi lần sửa
+                    chính tả của mình là thứ ai cũng học cách bỏ qua, và một ô lý do luôn trống
+                    thì không còn nói lên điều gì. */}
+                {incident.reporter.id !== me && (
+                  <div className="field">
+                    <label htmlFor="edit-reason">{tr('Lý do sửa (đi kèm mọi dòng lịch sử)')}</label>
+                    <input
+                      id="edit-reason"
+                      maxLength={500}
+                      value={draft.reason}
+                      onChange={(e) => setDraft({ ...draft, reason: e.target.value })}
+                    />
+                  </div>
+                )}
+                <div className="editor-actions">
+                  <button type="button" className="btn btn-secondary" onClick={() => setEditing(false)}>
+                    {tr('Hủy')}
+                  </button>
+                  <SubmitButton action={editAction} processingLabel={tr('Đang lưu…')} className="btn btn-primary">
+                    {tr('Lưu')}
+                  </SubmitButton>
+                </div>
+              </form>
+            ) : (
             <dl className="meta">
               <dt>{tr('Mô tả')}</dt>
               <dd>{incident.description || <span className="muted">{tr('Không có')}</span>}</dd>
@@ -268,6 +452,7 @@ function IncidentDetail({ id }: { id: string }) {
                 )}
               </dd>
             </dl>
+            )}
           </section>
 
           <section className="incident-block">
@@ -310,8 +495,60 @@ function IncidentDetail({ id }: { id: string }) {
                     <div>
                       <strong>{comment.author.displayName}</strong>{' '}
                       <span className="muted">· {formatTime(comment.createdAt)}</span>
+                      <EditTrail
+                        lastEdit={comment.lastEdit}
+                        loadRevisions={() => api.commentRevisions(project, id, comment.id)}
+                      />
+                      {(comment.author.id === me || canManageAny) && editingComment !== comment.id
+                        && !incident.isDeleted && (
+                        <>
+                          {' '}
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={() => {
+                              setEditingComment(comment.id);
+                              setCommentDraft(comment.body);
+                            }}
+                          >
+                            {tr('Sửa')}
+                          </button>
+                        </>
+                      )}
                     </div>
-                    <div>{comment.body}</div>
+                    {editingComment === comment.id ? (
+                      <div>
+                        <ActiveEditorsNotice editors={commentEditors} />
+                        <ActionFeedback action={commentEditAction} processingLabel={tr('Đang lưu trao đổi…')} />
+                        <div className="field">
+                          <label htmlFor={`edit-comment-${comment.id}`}>{tr('Nội dung')}<RequiredMark /></label>
+                          <textarea
+                            id={`edit-comment-${comment.id}`}
+                            required
+                            maxLength={2000}
+                            value={commentDraft}
+                            onChange={(e) => setCommentDraft(e.target.value)}
+                          />
+                        </div>
+                        <div className="editor-actions">
+                          <button type="button" className="btn btn-secondary" onClick={() => setEditingComment(null)}>
+                            {tr('Hủy')}
+                          </button>
+                          <SubmitButton
+                            action={commentEditAction}
+                            type="button"
+                            disabled={!commentDraft.trim()}
+                            processingLabel={tr('Đang lưu…')}
+                            className="btn btn-primary"
+                            onClick={() => saveComment(comment.id, comment.version)}
+                          >
+                            {tr('Lưu')}
+                          </SubmitButton>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>{comment.body}</div>
+                    )}
                   </li>
                 ))}
               </ul>
