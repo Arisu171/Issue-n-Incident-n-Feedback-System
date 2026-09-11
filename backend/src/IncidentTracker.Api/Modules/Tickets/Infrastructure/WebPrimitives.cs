@@ -19,30 +19,96 @@ public static class EntityTags
     /// Ném 412 khi client gửi <c>If-Match</c> không khớp phiên bản hiện tại. Thiếu header thì bỏ
     /// qua (last-write-wins — giống GitHub, vốn không bắt buộc If-Match); <c>*</c> luôn khớp.
     /// </summary>
-    public static void EnsureIfMatch(HttpRequest request, int currentVersion)
+    public static void EnsureIfMatch(HttpRequest request, int currentVersion, string subject = "Ticket")
     {
-        if (!request.Headers.TryGetValue(HeaderNames.IfMatch, out var values) || values.Count == 0)
+        var outcome = Evaluate(request, currentVersion);
+
+        // Không gửi header nghĩa là client chấp nhận last-write-wins. Đó là lựa chọn của họ, và
+        // ở chế độ này hệ thống tôn trọng nó.
+        if (outcome is MatchOutcome.Absent or MatchOutcome.Matches)
         {
             return;
         }
 
-        var raw = values.ToString();
-        if (raw.Trim() == "*")
+        throw Stale(currentVersion, subject);
+    }
+
+    /// <summary>
+    /// Như <see cref="EnsureIfMatch"/> nhưng <c>If-Match</c> là <b>bắt buộc</b>: thiếu header
+    /// thì ném <c>428 Precondition Required</c>.
+    ///
+    /// Dùng khi bản ghi đang bị người khác chiếm dụng để sửa. Lúc đó "không gửi If-Match" không
+    /// còn là một lựa chọn hợp lệ của client — nó nghĩa là ghi đè lên một bản mà người khác có
+    /// thể vừa thay đổi, và người bị mất chữ sẽ không bao giờ biết chữ mình đi đâu.
+    ///
+    /// <c>*</c> cũng bị từ chối: nó chỉ khẳng định "bản ghi có tồn tại", không khẳng định gì về
+    /// phiên bản — tức là không trả lời đúng câu hỏi đang được hỏi.
+    /// </summary>
+    public static void RequireIfMatch(
+        HttpRequest request, int currentVersion, string subject, IReadOnlyList<string> editors)
+    {
+        var outcome = Evaluate(request, currentVersion);
+
+        if (outcome == MatchOutcome.Matches)
         {
             return;
+        }
+
+        if (outcome == MatchOutcome.Mismatch)
+        {
+            throw Stale(currentVersion, subject);
+        }
+
+        throw new AppException(StatusCodes.Status428PreconditionRequired,
+            "Cần If-Match",
+            $"{subject} đang được {string.Join(", ", editors)} mở để sửa, nên lần ghi này phải kèm "
+            + $"header If-Match: {Of(currentVersion)}. Tải lại bản mới nhất rồi gửi kèm phiên bản của nó.",
+            new Dictionary<string, object?>
+            {
+                ["currentVersion"] = currentVersion,
+                ["etag"] = Of(currentVersion),
+                ["activeEditors"] = editors
+            });
+    }
+
+    private enum MatchOutcome
+    {
+        /// <summary>Client không gửi header, hoặc chỉ gửi <c>*</c>.</summary>
+        Absent,
+        Matches,
+        Mismatch
+    }
+
+    private static MatchOutcome Evaluate(HttpRequest request, int currentVersion)
+    {
+        if (!request.Headers.TryGetValue(HeaderNames.IfMatch, out var values) || values.Count == 0)
+        {
+            return MatchOutcome.Absent;
+        }
+
+        var raw = values.ToString();
+
+        // `*` gộp chung với "không gửi": cả hai đều không nói gì về phiên bản. Chế độ tùy chọn
+        // cho qua, chế độ bắt buộc từ chối — và cả hai đều đúng với ngữ nghĩa của `*`.
+        if (raw.Trim() == "*")
+        {
+            return MatchOutcome.Absent;
         }
 
         var expected = Of(currentVersion);
         var matches = raw.Split(',').Select(v => v.Trim())
             .Any(v => v == expected || v == expected.Trim('"') || v == "W/" + expected);
 
-        if (!matches)
-        {
-            throw new AppException(StatusCodes.Status412PreconditionFailed,
-                "Phiên bản đã thay đổi",
-                $"Ticket đã được người khác cập nhật (phiên bản hiện tại {expected}). Tải lại rồi thử lại.",
-                new Dictionary<string, object?> { ["currentVersion"] = currentVersion, ["etag"] = expected });
-        }
+        return matches ? MatchOutcome.Matches : MatchOutcome.Mismatch;
+    }
+
+    private static AppException Stale(int currentVersion, string subject)
+    {
+        var expected = Of(currentVersion);
+        return new AppException(StatusCodes.Status412PreconditionFailed,
+            "Phiên bản đã thay đổi",
+            $"{subject} đã được người khác cập nhật (phiên bản hiện tại {expected}). Tải lại rồi thử lại.",
+            new Dictionary<string, object?> { ["currentVersion"] = currentVersion, ["etag"] = expected });
     }
 }
 
