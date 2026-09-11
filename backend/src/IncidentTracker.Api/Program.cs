@@ -56,6 +56,11 @@ builder.Services.AddOptions<FeedbackOptions>()
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+builder.Services.AddOptions<IncidentTracker.Api.Modules.Revisions.EditClaimOptions>()
+    .Bind(builder.Configuration.GetSection(IncidentTracker.Api.Modules.Revisions.EditClaimOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
 builder.Services.AddOptions<TicketingOptions>()
     .Bind(builder.Configuration.GetSection(TicketingOptions.SectionName))
     .ValidateDataAnnotations()
@@ -105,6 +110,9 @@ builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<ITransactionFaultHook, NoOpTransactionFaultHook>();
 builder.Services.AddScoped<IdentityService>();
 builder.Services.AddScoped<RbacService>();
+// Lịch sử sửa nội dung dùng chung cho Incident, Feedback và bình luận của cả hai.
+builder.Services.AddScoped<IncidentTracker.Api.Modules.Revisions.ContentRevisionService>();
+builder.Services.AddScoped<IncidentTracker.Api.Modules.Revisions.EditClaimService>();
 builder.Services.AddScoped<IncidentService>();
 builder.Services.AddScoped<IncidentCommentService>();
 builder.Services.AddScoped<FeedbackService>();
