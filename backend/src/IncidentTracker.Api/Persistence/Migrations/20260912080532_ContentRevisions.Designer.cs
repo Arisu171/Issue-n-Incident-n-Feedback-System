@@ -3,6 +3,7 @@ using System;
 using IncidentTracker.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NpgsqlTypes;
@@ -12,9 +13,11 @@ using NpgsqlTypes;
 namespace IncidentTracker.Api.Persistence.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260912080532_ContentRevisions")]
+    partial class ContentRevisions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -246,46 +249,6 @@ namespace IncidentTracker.Api.Persistence.Migrations
                         });
                 });
 
-            modelBuilder.Entity("IncidentTracker.Api.Domain.EditClaim", b =>
-                {
-                    b.Property<string>("EntityType")
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)")
-                        .HasColumnName("entity_type");
-
-                    b.Property<Guid>("EntityId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("entity_id");
-
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("user_id");
-
-                    b.Property<DateTimeOffset>("ClaimedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("claimed_at")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<DateTimeOffset>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("expires_at");
-
-                    b.HasKey("EntityType", "EntityId", "UserId");
-
-                    b.HasIndex("ExpiresAt")
-                        .HasDatabaseName("ix_edit_claims_expires_at");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("edit_claims", null, t =>
-                        {
-                            t.HasCheckConstraint("ck_edit_claims_entity_type", "entity_type in ('Incident','IncidentComment','Feedback','FeedbackReply')");
-
-                            t.HasCheckConstraint("ck_edit_claims_expiry", "expires_at > claimed_at");
-                        });
-                });
-
             modelBuilder.Entity("IncidentTracker.Api.Domain.Feedback", b =>
                 {
                     b.Property<Guid>("Id")
@@ -342,11 +305,6 @@ namespace IncidentTracker.Api.Persistence.Migrations
                         .HasColumnType("character varying(20)")
                         .HasDefaultValue("New")
                         .HasColumnName("status");
-
-                    b.Property<int>("Version")
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("version");
 
                     b.HasKey("Id");
 
@@ -418,11 +376,6 @@ namespace IncidentTracker.Api.Persistence.Migrations
                     b.Property<Guid?>("ResponderId")
                         .HasColumnType("uuid")
                         .HasColumnName("responder_id");
-
-                    b.Property<int>("Version")
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("version");
 
                     b.HasKey("Id");
 
@@ -572,11 +525,6 @@ namespace IncidentTracker.Api.Persistence.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("title");
 
-                    b.Property<int>("Version")
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("version");
-
                     b.HasKey("Id");
 
                     b.HasIndex("LastEditedBy");
@@ -649,11 +597,6 @@ namespace IncidentTracker.Api.Persistence.Migrations
                     b.Property<Guid?>("LastEditedBy")
                         .HasColumnType("uuid")
                         .HasColumnName("last_edited_by");
-
-                    b.Property<int>("Version")
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("version");
 
                     b.HasKey("Id");
 
@@ -2352,17 +2295,6 @@ namespace IncidentTracker.Api.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("EditedByUser");
-                });
-
-            modelBuilder.Entity("IncidentTracker.Api.Domain.EditClaim", b =>
-                {
-                    b.HasOne("IncidentTracker.Api.Domain.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("IncidentTracker.Api.Domain.Feedback", b =>
