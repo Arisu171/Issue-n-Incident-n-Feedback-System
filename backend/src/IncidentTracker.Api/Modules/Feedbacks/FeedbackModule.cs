@@ -5,6 +5,7 @@ using IncidentTracker.Api.Common;
 using IncidentTracker.Api.Domain;
 using IncidentTracker.Api.Persistence;
 using IncidentTracker.Api.Modules.Incidents;
+using IncidentTracker.Api.Modules.Revisions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -29,6 +30,39 @@ public sealed class CreateFeedbackRequest
     public Guid? IncidentId { get; set; }
 }
 
+/// <summary>
+/// PATCH nội dung phản hồi — mọi trường tùy chọn, <c>null</c> = không đổi.
+///
+/// Cố ý KHÔNG có <c>Status</c> và <c>IncidentId</c>: trạng thái tiếp nhận là hệ quả của việc
+/// gắn sự cố và việc trả lời (BR-BIZ-12), còn liên kết sự cố đã có <c>POST/DELETE {id}/link</c>
+/// với ràng buộc riêng. Mở đường thứ hai tới chúng ở đây là bỏ qua đúng những ràng buộc đó.
+/// </summary>
+public sealed class UpdateFeedbackRequest
+{
+    public FeedbackChannel? Channel { get; set; }
+
+    /// <summary>Chuỗi rỗng = xóa email liên hệ; bỏ trống trường = giữ nguyên.</summary>
+    [MaxLength(320)]
+    public string? CustomerEmail { get; set; }
+
+    [MinLength(10), MaxLength(10_000)]
+    public string? Content { get; set; }
+
+    /// <summary>Lý do sửa — nên điền khi sửa phản hồi của người khác.</summary>
+    [MaxLength(500)]
+    public string? Reason { get; set; }
+}
+
+/// <summary>Sửa một câu trả lời. Body bắt buộc — đây là PUT nội dung, không phải PATCH từng phần.</summary>
+public sealed class UpdateFeedbackReplyRequest
+{
+    [Required, MinLength(1), MaxLength(2000)]
+    public string Body { get; set; } = string.Empty;
+
+    [MaxLength(500)]
+    public string? Reason { get; set; }
+}
+
 public sealed class LinkFeedbackRequest
 {
     [Required]
@@ -46,7 +80,11 @@ public sealed record FeedbackResponse(
     IncidentStatus? IncidentStatus,
     Guid CreatedBy,
     string CreatedByName,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    /// <summary>null khi phản hồi còn nguyên bản; lịch sử đầy đủ ở <c>{id}/revisions</c>.</summary>
+    EditSignature? LastEdit,
+    /// <summary>Phiên bản nội dung — đặt vào <c>If-Match: "v{version}"</c> khi lưu.</summary>
+    int Version);
 
 public sealed class CreateFeedbackReplyRequest
 {
@@ -61,7 +99,11 @@ public sealed record FeedbackReplyResponse(
     UserRef? Responder,
     bool IsAutomatic,
     string Body,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    /// <summary>Luôn null với lời xác nhận tự động — không ai sửa được nó.</summary>
+    EditSignature? LastEdit,
+    /// <summary>Phiên bản nội dung — đặt vào <c>If-Match: "v{version}"</c> khi lưu.</summary>
+    int Version);
 
 /// <summary>
 /// Bổ sung so với mục 6.6: không có endpoint danh sách thì partial index
@@ -88,14 +130,19 @@ public sealed class FeedbackService
     private readonly AppDbContext _db;
     private readonly IAuthorizationService _authorization;
     private readonly IOptionsMonitor<FeedbackOptions> _options;
+    private readonly ContentRevisionService _revisions;
+    private readonly EditClaimService _claims;
     private readonly ILogger<FeedbackService> _logger;
 
     public FeedbackService(AppDbContext db, IAuthorizationService authorization,
-        IOptionsMonitor<FeedbackOptions> options, ILogger<FeedbackService> logger)
+        IOptionsMonitor<FeedbackOptions> options, ContentRevisionService revisions,
+        EditClaimService claims, ILogger<FeedbackService> logger)
     {
         _db = db;
         _authorization = authorization;
         _options = options;
+        _revisions = revisions;
+        _claims = claims;
         _logger = logger;
     }
 
@@ -150,6 +197,334 @@ public sealed class FeedbackService
             actorId, feedback.Id, feedback.Channel, feedback.IncidentId is not null, autoAck.AutoAckEnabled);
 
         return await LoadAsync(feedback.Id, ct);
+    }
+
+    // ---------------- Sửa nội dung ----------------
+
+    /// <summary>
+    /// Sửa kênh, email liên hệ và nội dung phản hồi — người đã gửi nó, hoặc người có
+    /// <c>feedback.respond</c>.
+    ///
+    /// Lời của khách hàng sửa được là chuyện phải cân nhắc, nên cái giá đi kèm được trả đủ:
+    /// mỗi trường đổi để lại một dòng trong <c>content_revisions</c> với nguyên văn cũ và tên
+    /// người đã thay nó. Nhân viên sửa hộ khách thì dòng đó mang <c>on_behalf</c> — đọc lịch
+    /// sử là phân biệt được ngay "khách nói lại" với "nhân viên viết lại".
+    /// </summary>
+    public async Task<FeedbackResponse> UpdateAsync(
+        Guid feedbackId, UpdateFeedbackRequest request, ClaimsPrincipal caller,
+        HttpRequest http, CancellationToken ct)
+    {
+        var actorId = caller.GetUserId();
+        var strategy = _db.Database.CreateExecutionStrategy();
+        var changedFields = string.Empty;
+        var onBehalf = false;
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(
+                System.Data.IsolationLevel.ReadCommitted, ct);
+
+            // Khóa hàng trong transaction, cùng lý do với IncidentService: người sửa sau phải
+            // đọc được giá trị người sửa trước vừa ghi, nếu không old_value sẽ ghi lại một quá
+            // khứ không có thật.
+            var feedback = (await _db.Feedbacks
+                    .FromSql($"SELECT * FROM feedbacks WHERE id = {feedbackId} FOR UPDATE")
+                    .ToListAsync(ct))
+                .FirstOrDefault()
+                ?? throw AppException.NotFound($"Không tìm thấy phản hồi '{feedbackId}'.");
+
+            // 404 chứ không 403 khi không được đọc — cùng quyết định với LinkAsync: 403 xác
+            // nhận rằng phản hồi đó có thật.
+            if (!ResourceAccessRules.CanReadFeedback(caller, feedback.CreatedBy))
+            {
+                throw AppException.NotFound($"Không tìm thấy phản hồi '{feedbackId}'.");
+            }
+
+            EnsureCanEditFeedback(feedback.CreatedBy, caller);
+
+            // Cửa chiếm dụng — xem EditClaimService. Đặt sau khi đã khoá hàng.
+            await _claims.EnsureWritableAsync(http, EditableEntityType.Feedback, feedback.Id,
+                feedback.Version, actorId, "Phản hồi", ct);
+
+            onBehalf = feedback.CreatedBy != actorId;
+
+            var edit = _revisions.Begin(
+                EditableEntityType.Feedback, feedback.Id, feedback,
+                actorId, feedback.CreatedBy, request.Reason);
+
+            if (request.Channel is { } channel)
+            {
+                edit.Change("channel", feedback.Channel, channel);
+                feedback.Channel = channel;
+            }
+
+            if (request.CustomerEmail is not null)
+            {
+                var email = string.IsNullOrWhiteSpace(request.CustomerEmail)
+                    ? null
+                    : request.CustomerEmail.Trim().ToLowerInvariant();
+                edit.Change("customer_email", feedback.CustomerEmail, email);
+                feedback.CustomerEmail = email;
+            }
+
+            if (request.Content is not null)
+            {
+                var content = request.Content.Trim();
+
+                // Kiểm SAU khi cắt khoảng trắng: DataAnnotations đo chuỗi gốc nên một chuỗi
+                // toàn dấu cách lọt qua tầng bind rồi mới vi phạm check constraint của bảng.
+                if (content.Length < 10)
+                {
+                    throw AppException.BadRequest("Nội dung phản hồi phải dài ít nhất 10 ký tự.");
+                }
+
+                edit.Change("content", feedback.Content, content);
+                feedback.Content = content;
+            }
+
+            changedFields = edit.Record() ? edit.ChangedFields() : string.Empty;
+
+            if (changedFields.Length > 0)
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+            return true;
+        });
+
+        if (changedFields.Length > 0)
+        {
+            // NFR-SEC-02 / PII: chỉ ghi tên trường, không bao giờ ghi content hay customer_email.
+            _logger.LogInformation(
+                "Audit feedback.edit actor={ActorId} feedback={FeedbackId} fields={Fields} onBehalf={OnBehalf} result=success",
+                actorId, feedbackId, changedFields, onBehalf);
+        }
+
+        return await LoadAsync(feedbackId, ct);
+    }
+
+    /// <summary>
+    /// Sửa một câu trả lời — người đã viết nó, hoặc người có <c>feedback.respond</c>.
+    ///
+    /// Lời xác nhận tự động trả 409: nó không có tác giả để đứng tên và nó là bản sao đúng
+    /// câu hệ thống đã gửi cho khách, nên sửa nó là sửa lại quá khứ.
+    /// </summary>
+    public async Task<FeedbackReplyResponse> UpdateReplyAsync(
+        Guid feedbackId, Guid replyId, UpdateFeedbackReplyRequest request,
+        ClaimsPrincipal caller, HttpRequest http, CancellationToken ct)
+    {
+        var actorId = caller.GetUserId();
+        var body = request.Body.Trim();
+
+        if (body.Length == 0)
+        {
+            throw AppException.BadRequest("Nội dung câu trả lời không được rỗng.");
+        }
+
+        var feedback = await _db.Feedbacks.AsNoTracking()
+            .FirstOrDefaultAsync(f => f.Id == feedbackId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy phản hồi '{feedbackId}'.");
+
+        await EnsureAsync(feedback, caller, ResourceOperationRequirement.Read,
+            "Phản hồi này không do bạn gửi.");
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+        var changed = false;
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(
+                System.Data.IsolationLevel.ReadCommitted, ct);
+
+            var reply = (await _db.FeedbackReplies
+                    .FromSql($"SELECT * FROM feedback_replies WHERE id = {replyId} FOR UPDATE")
+                    .ToListAsync(ct))
+                .FirstOrDefault();
+
+            if (reply is null || reply.FeedbackId != feedbackId)
+            {
+                throw AppException.NotFound($"Không tìm thấy câu trả lời '{replyId}'.");
+            }
+
+            EnsureCanEditReply(reply, caller);
+
+            // Cửa chiếm dụng — xem EditClaimService. Đặt sau khi đã khoá hàng.
+            await _claims.EnsureWritableAsync(http, EditableEntityType.FeedbackReply, reply.Id,
+                reply.Version, actorId, "Câu trả lời", ct);
+
+            var edit = _revisions.Begin(
+                EditableEntityType.FeedbackReply, reply.Id, reply,
+                actorId, reply.ResponderId, request.Reason);
+
+            edit.Change("body", reply.Body, body);
+            reply.Body = body;
+
+            changed = edit.Record();
+            if (changed)
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+            return true;
+        });
+
+        if (changed)
+        {
+            // NFR-SEC-02: không ghi body vào log.
+            _logger.LogInformation(
+                "Audit feedback.reply.edit actor={ActorId} feedback={FeedbackId} reply={ReplyId} result=success",
+                actorId, feedbackId, replyId);
+        }
+
+        _db.ChangeTracker.Clear();
+        var updated = await _db.FeedbackReplies.AsNoTracking()
+            .Include(r => r.Responder)
+            .Include(r => r.LastEditor)
+            .FirstAsync(r => r.Id == replyId, ct);
+
+        return ToReplyResponse(updated);
+    }
+
+    /// <summary>
+    /// Lịch sử sửa của một phản hồi. Ràng buộc đọc y hệt bản ghi cha: giá trị cũ của
+    /// <c>content</c> và <c>customer_email</c> là PII đầy đủ, nên để hở đường này là để hở
+    /// đúng thứ BR-BIZ-11 che.
+    /// </summary>
+    public async Task<IReadOnlyList<RevisionResponse>> GetRevisionsAsync(
+        Guid feedbackId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        var feedback = await _db.Feedbacks.AsNoTracking()
+            .FirstOrDefaultAsync(f => f.Id == feedbackId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy phản hồi '{feedbackId}'.");
+
+        await EnsureAsync(feedback, caller, ResourceOperationRequirement.Read,
+            "Phản hồi này không do bạn gửi.");
+
+        return await _revisions.ListAsync(EditableEntityType.Feedback, feedbackId, ct);
+    }
+
+    /// <summary>Lịch sử sửa của một câu trả lời — ràng buộc đọc đi theo phản hồi cha.</summary>
+    public async Task<IReadOnlyList<RevisionResponse>> GetReplyRevisionsAsync(
+        Guid feedbackId, Guid replyId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        var feedback = await _db.Feedbacks.AsNoTracking()
+            .FirstOrDefaultAsync(f => f.Id == feedbackId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy phản hồi '{feedbackId}'.");
+
+        await EnsureAsync(feedback, caller, ResourceOperationRequirement.Read,
+            "Phản hồi này không do bạn gửi.");
+
+        var exists = await _db.FeedbackReplies.AsNoTracking()
+            .AnyAsync(r => r.Id == replyId && r.FeedbackId == feedbackId, ct);
+
+        if (!exists)
+        {
+            throw AppException.NotFound($"Không tìm thấy câu trả lời '{replyId}'.");
+        }
+
+        return await _revisions.ListAsync(EditableEntityType.FeedbackReply, replyId, ct);
+    }
+
+    // ---------------- Chỗ sửa ----------------
+
+    /// <summary>Nhận hoặc gia hạn chỗ sửa trên một phản hồi — cùng điều kiện với đường PATCH.</summary>
+    public async Task<EditClaimResponse> ClaimFeedbackEditAsync(
+        Guid feedbackId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        var feedback = await LoadForClaimAsync(feedbackId, caller, ct);
+        EnsureCanEditFeedback(feedback.CreatedBy, caller);
+
+        return await _claims.ClaimAsync(
+            EditableEntityType.Feedback, feedbackId, feedback.Version, caller.GetUserId(), ct);
+    }
+
+    /// <summary>Nhả chỗ sửa — chỉ xoá hàng của chính người gọi, nên không đòi quyền sửa.</summary>
+    public async Task ReleaseFeedbackEditAsync(
+        Guid feedbackId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        await LoadForClaimAsync(feedbackId, caller, ct);
+        await _claims.ReleaseAsync(EditableEntityType.Feedback, feedbackId, caller.GetUserId(), ct);
+    }
+
+    public async Task<EditClaimResponse> ClaimReplyEditAsync(
+        Guid feedbackId, Guid replyId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        await LoadForClaimAsync(feedbackId, caller, ct);
+
+        var reply = await _db.FeedbackReplies.AsNoTracking()
+            .FirstOrDefaultAsync(r => r.Id == replyId && r.FeedbackId == feedbackId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy câu trả lời '{replyId}'.");
+
+        EnsureCanEditReply(reply, caller);
+
+        return await _claims.ClaimAsync(
+            EditableEntityType.FeedbackReply, replyId, reply.Version, caller.GetUserId(), ct);
+    }
+
+    public async Task ReleaseReplyEditAsync(
+        Guid feedbackId, Guid replyId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        await LoadForClaimAsync(feedbackId, caller, ct);
+        await _claims.ReleaseAsync(EditableEntityType.FeedbackReply, replyId, caller.GetUserId(), ct);
+    }
+
+    private async Task<Feedback> LoadForClaimAsync(
+        Guid feedbackId, ClaimsPrincipal caller, CancellationToken ct)
+    {
+        var feedback = await _db.Feedbacks.AsNoTracking()
+            .FirstOrDefaultAsync(f => f.Id == feedbackId, ct)
+            ?? throw AppException.NotFound($"Không tìm thấy phản hồi '{feedbackId}'.");
+
+        await EnsureAsync(feedback, caller, ResourceOperationRequirement.Read,
+            "Phản hồi này không do bạn gửi.");
+
+        return feedback;
+    }
+
+    /// <summary>
+    /// Một cửa duy nhất cho câu hỏi "người này sửa được phản hồi này không" — đường PATCH và
+    /// đường giữ chỗ phải hẹp bằng nhau, nếu không thì chiếm được chỗ mà không ghi được.
+    /// </summary>
+    private static void EnsureCanEditFeedback(Guid createdBy, ClaimsPrincipal caller)
+    {
+        if (!ResourceAccessRules.CanEditFeedback(caller, createdBy))
+        {
+            throw new AppException(
+                StatusCodes.Status403Forbidden,
+                "Không đủ quyền",
+                "Chỉ người đã gửi phản hồi mới sửa được nội dung của nó, hoặc cần permission "
+                + $"'{Permissions.FeedbackRespond}'.",
+                new Dictionary<string, object?>
+                {
+                    ["requiredPermission"] = Permissions.FeedbackRespond
+                });
+        }
+    }
+
+    private static void EnsureCanEditReply(FeedbackReply reply, ClaimsPrincipal caller)
+    {
+        if (reply.IsAutomatic)
+        {
+            throw AppException.Conflict(
+                "Lời xác nhận tự động là bản sao đúng câu hệ thống đã gửi cho khách nên không sửa được.");
+        }
+
+        if (!ResourceAccessRules.CanEditFeedbackReply(caller, reply.ResponderId, reply.IsAutomatic))
+        {
+            throw new AppException(
+                StatusCodes.Status403Forbidden,
+                "Không đủ quyền",
+                "Chỉ người đã viết câu trả lời mới sửa được, hoặc cần permission "
+                + $"'{Permissions.FeedbackRespond}'.",
+                new Dictionary<string, object?>
+                {
+                    ["requiredPermission"] = Permissions.FeedbackRespond
+                });
+        }
     }
 
     /// <summary>
@@ -271,6 +646,7 @@ public sealed class FeedbackService
 
         var rows = await _db.FeedbackReplies.AsNoTracking()
             .Include(r => r.Responder)
+            .Include(r => r.LastEditor)
             .Where(r => r.FeedbackId == feedbackId)
             .OrderBy(r => r.CreatedAt).ThenBy(r => r.Id)
             .ToListAsync(ct);
@@ -481,7 +857,8 @@ public sealed class FeedbackService
     private IQueryable<Feedback> BaseQuery()
         => _db.Feedbacks.AsNoTracking()
             .Include(f => f.Incident)
-            .Include(f => f.CreatedByUser);
+            .Include(f => f.CreatedByUser)
+            .Include(f => f.LastEditor);
 
     private async Task<FeedbackResponse> LoadAsync(Guid id, CancellationToken ct)
     {
@@ -494,12 +871,16 @@ public sealed class FeedbackService
     private static FeedbackResponse ToResponse(Feedback f)
         => new(f.Id, f.Channel, f.CustomerEmail, f.Content, f.Status, f.IncidentId,
             f.Incident?.Title, f.Incident?.Status,
-            f.CreatedBy, f.CreatedByUser?.DisplayName ?? string.Empty, f.CreatedAt);
+            f.CreatedBy, f.CreatedByUser?.DisplayName ?? string.Empty, f.CreatedAt,
+            ContentRevisionService.SignatureOf(f.LastEditedAt, f.LastEditor),
+            f.Version);
 
     private static FeedbackReplyResponse ToReplyResponse(FeedbackReply r)
         => new(r.Id, r.FeedbackId,
             r.Responder is null ? null : new UserRef(r.Responder.Id, r.Responder.DisplayName, r.Responder.Email),
-            r.IsAutomatic, r.Body, r.CreatedAt);
+            r.IsAutomatic, r.Body, r.CreatedAt,
+            ContentRevisionService.SignatureOf(r.LastEditedAt, r.LastEditor),
+            r.Version);
 }
 
 // ---------------- Controller ----------------
@@ -645,5 +1026,116 @@ public sealed class FeedbacksController : ControllerBase
         await EnsureInScopeAsync(project, id, ct);
         var created = await _feedbacks.ReplyAsync(id, request, User, ct);
         return CreatedAtAction(nameof(Replies), new { project, id }, created);
+    }
+
+    /// <summary>API-Feedback-Update — sửa nội dung phản hồi, nguyên văn cũ ở lại trong lịch sử.</summary>
+    [HttpPatch("{id:guid}")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(typeof(FeedbackResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<FeedbackResponse>> Update(
+        string project, Guid id, UpdateFeedbackRequest request, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        var updated = await _feedbacks.UpdateAsync(id, request, User, Request, ct);
+        Tickets.Infrastructure.EntityTags.SetETag(Response, updated.Version);
+        return Ok(updated);
+    }
+
+    /// <summary>API-Feedback-EditClaim — "tôi đang mở form sửa phản hồi này".</summary>
+    [HttpPut("{id:guid}/edit-claim")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(typeof(EditClaimResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<EditClaimResponse>> ClaimEdit(
+        string project, Guid id, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        return Ok(await _feedbacks.ClaimFeedbackEditAsync(id, User, ct));
+    }
+
+    /// <summary>API-Feedback-EditClaim-Release.</summary>
+    [HttpDelete("{id:guid}/edit-claim")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ReleaseEdit(string project, Guid id, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        await _feedbacks.ReleaseFeedbackEditAsync(id, User, ct);
+        return NoContent();
+    }
+
+    /// <summary>API-Feedback-Revisions — ai đã sửa gì, từ giá trị nào sang giá trị nào.</summary>
+    [HttpGet("{id:guid}/revisions")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(typeof(IReadOnlyList<RevisionResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<IReadOnlyList<RevisionResponse>>> Revisions(
+        string project, Guid id, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        return Ok(await _feedbacks.GetRevisionsAsync(id, User, ct));
+    }
+
+    /// <summary>API-Feedback-Reply-Update — sửa câu trả lời đã gửi.</summary>
+    [HttpPatch("{id:guid}/replies/{replyId:guid}")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(typeof(FeedbackReplyResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<FeedbackReplyResponse>> UpdateReply(
+        string project, Guid id, Guid replyId, UpdateFeedbackReplyRequest request, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        return Ok(await _feedbacks.UpdateReplyAsync(id, replyId, request, User, Request, ct));
+    }
+
+    /// <summary>API-Feedback-Reply-EditClaim.</summary>
+    [HttpPut("{id:guid}/replies/{replyId:guid}/edit-claim")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(typeof(EditClaimResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<EditClaimResponse>> ClaimReplyEdit(
+        string project, Guid id, Guid replyId, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        return Ok(await _feedbacks.ClaimReplyEditAsync(id, replyId, User, ct));
+    }
+
+    /// <summary>API-Feedback-Reply-EditClaim-Release.</summary>
+    [HttpDelete("{id:guid}/replies/{replyId:guid}/edit-claim")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ReleaseReplyEdit(
+        string project, Guid id, Guid replyId, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        await _feedbacks.ReleaseReplyEditAsync(id, replyId, User, ct);
+        return NoContent();
+    }
+
+    /// <summary>API-Feedback-Reply-Revisions.</summary>
+    [HttpGet("{id:guid}/replies/{replyId:guid}/revisions")]
+    [RequirePermission(Permissions.FeedbackRead)]
+    [ProducesResponseType(typeof(IReadOnlyList<RevisionResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<IReadOnlyList<RevisionResponse>>> ReplyRevisions(
+        string project, Guid id, Guid replyId, CancellationToken ct)
+    {
+        await EnsureInScopeAsync(project, id, ct);
+        return Ok(await _feedbacks.GetReplyRevisionsAsync(id, replyId, User, ct));
     }
 }
